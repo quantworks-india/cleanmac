@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cleanmac — dispatcher: legacy bash junk cleanup OR Python subcommands.
+# cleanmac — dispatcher: bash junk-cleanup OR Python subcommands.
 # Legacy:  cleanmac [--dry-run] [--verbose] [--app NAME]
 # Python:  cleanmac {app,dup,disk,mem,hidden} ...
 set -u
@@ -11,7 +11,7 @@ KNOWN_SUBCOMMANDS="app dup disk mem hidden"
 # Legacy mode: no args, or first arg is NOT a known subcommand.
 #   cleanmac              → bash junk cleanup (live)
 #   cleanmac --dry-run    → bash junk cleanup dry-run
-#   cleanmac --app X      → bash legacy leftover search
+#   cleanmac --app X      → bash leftover search
 if [[ $# -eq 0 ]] || ! [[ " $KNOWN_SUBCOMMANDS " == *" $1 "* ]]; then
   exec "${HERE}/legacy_cleanmac.sh" "$@"
 fi

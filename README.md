@@ -10,7 +10,7 @@ It combines a battle-tested **bash junk-cleanup engine** with a **Python toolkit
 
 | MacCleaner Pro tool | `cleanmac` command | Engine | Description |
 |---|---|---|---|
-| Junk Cleanup | `cleanmac` (legacy) | Bash | Caches, logs, trash, snapshots, Homebrew, dev caches, DNS/RAM, periodic maintenance |
+| Junk Cleanup | `cleanmac` (bash) | Bash | Caches, logs, trash, snapshots, Homebrew, dev caches, DNS/RAM, periodic maintenance |
 | App Cleaner & Uninstaller | `cleanmac app` | Python | List, remove (with leftovers), reset, startup agents, extensions, updates |
 | Duplicate File Finder | `cleanmac dup` | Python | Duplicate scan, similar-photo grouping, folder merging |
 | Disk Space Analyzer | `cleanmac disk` | Python | Scan, top largest, summary, system-data breakdown, HTML treemap report |
@@ -40,7 +40,7 @@ export PATH="$HOME/projects/utils/cleanmac/bin:$PATH"
 After setup, `cleanmac` is available everywhere:
 
 ```bash
-cleanmac              # legacy bash junk cleanup
+cleanmac # bash junk cleanup
 cleanmac app list     # Python app uninstaller
 ```
 
@@ -55,13 +55,13 @@ cleanmac app list     # Python app uninstaller
 
 `bin/cleanmac` is a thin dispatcher with two modes. Routing is decided by the **first argument**:
 
-- **Legacy mode** — no args, or the first arg is not one of the five known subcommands (`app`, `dup`, `disk`, `mem`, `hidden`). Forwards to `bin/legacy_cleanmac.sh` (the bash junk-cleanup engine).
+- **Bash mode** — no args, or the first arg is not one of the five known subcommands (`app`, `dup`, `disk`, `mem`, `hidden`). Forwards to `bin/legacy_cleanmac.sh` (the bash junk-cleanup engine).
 - **Python mode** — the first arg is a known subcommand. Forwards all args to `python3 -m maccleaner.cli`.
 
 ```
 cleanmac                      → bash junk cleanup (live)
 cleanmac --dry-run            → bash junk cleanup (dry-run)
-cleanmac --app X              → bash legacy leftover search
+cleanmac --app X              → bash leftover search
 cleanmac app list             → Python app uninstaller
 cleanmac dup scan ~/Downloads → Python duplicate finder
 ```
@@ -236,7 +236,7 @@ cleanmac --commit app remove Slack # real deletion
 
 This is enforced at the leaf, not just the CLI layer: the `Deleter` class in `core.py` is a no-op unless `commit=True`, so every code path that reaches deletion is gated.
 
-> **Note:** the legacy bash engine is **live by default** (backward compatible). Pass `--dry-run` to preview. This asymmetry is intentional — the bash engine predates the Python toolkit.
+> **Note:** the bash engine is **live by default** (backward compatible). Pass `--dry-run` to preview. This asymmetry is intentional — the bash engine predates the Python toolkit.
 
 ### `safe_rm` — protected roots
 
@@ -316,8 +316,8 @@ Logs and audits are auto-pruned to **30 days** after each bash run.
 ```
 cleanmac/
 ├── bin/
-│   ├── cleanmac              # dispatcher: legacy bash OR Python subcommands
-│   └── legacy_cleanmac.sh    # legacy bash junk cleanup (8 steps)
+│   ├── cleanmac              # dispatcher: bash junk-cleanup OR Python subcommands
+│   └── legacy_cleanmac.sh    # bash junk-cleanup engine (8 steps)
 ├── lib/
 │   ├── log.sh                # JSONL logging, audit, report, step framing, retention
 │   └── steps.sh              # one function per cleanup step (idempotent, self-reporting)
@@ -373,7 +373,7 @@ The bash suite is zero-dependency: it sandboxes `HOME`, stubs `sudo`/`brew`/`doc
 
 | Command | Subcommands |
 |---|---|
-| `cleanmac` (legacy) | *(no subcommand)* — `--dry-run`, `--verbose`, `--app <name>`, `-h`/`--help` |
+| `cleanmac` (no subcommand) | *(no subcommand)* — `--dry-run`, `--verbose`, `--app <name>`, `-h`/`--help` |
 | `cleanmac app` | `list`, `remove`, `reset`, `startup`, `extensions`, `update` |
 | `cleanmac dup` | `scan`, `similar-photos`, `merge-folders` |
 | `cleanmac disk` | `scan`, `top`, `summary`, `system-data`, `report` |
