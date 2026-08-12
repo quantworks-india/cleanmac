@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# cleanmac — dispatcher: legacy bash junk cleanup OR Python subcommands.
+# Legacy:  cleanmac [--dry-run] [--verbose] [--app NAME]
+# Python:  cleanmac {app,dup,disk,mem,hidden} ...
+set -u
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+KNOWN_SUBCOMMANDS="app dup disk mem hidden"
+
+# Legacy mode: no args, or first arg is NOT a known subcommand.
+#   cleanmac              → bash junk cleanup (live)
+#   cleanmac --dry-run    → bash junk cleanup dry-run
+#   cleanmac --app X      → bash legacy leftover search
+if [[ $# -eq 0 ]] || ! [[ " $KNOWN_SUBCOMMANDS " == *" $1 "* ]]; then
+  exec "${HERE}/legacy_cleanmac.sh" "$@"
+fi
+
+# Python mode: first arg is a known subcommand → forward ALL args.
+# Requires python3; py dir is sibling of bin.
+PY="${HERE}/../py"
+if [[ ! -d "${PY}/src/maccleaner" ]]; then
+  echo "cleanmac: python package not found at ${PY}/src/maccleaner" >&2
+  exit 1
+fi
+
+PYTHONPATH="${PY}/src" exec python3 -m maccleaner.cli "$@"

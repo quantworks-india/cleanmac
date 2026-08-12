@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maccleaner"
+version = "0.1.0"
+description = "Free CLI replacement for MacCleaner Pro: uninstall apps, find duplicates, analyze disk, free memory."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.6",
+]
+# Pillow is a hard dependency for photo similarity hashing.
+photos = ["pillow>=10.0"]
+
+[project.scripts]
+cleanmac-py = "maccleaner.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
