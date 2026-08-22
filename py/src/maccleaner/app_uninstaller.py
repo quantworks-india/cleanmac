@@ -171,22 +171,7 @@ def _run_remove(args, deleter: Deleter, sudo: Sudo) -> int:
     print("\nDeleting app bundle + leftovers:")
     deleter.delete("app_remove", [app.path])
     deleter.delete("app_remove", user)
-
-    for p in sys_paths:
-        if not is_safe_path(p):
-            continue
-        size = dir_size_kb(p) * 1024
-        if not deleter.commit:
-            deleter.auditor.write("app_remove", "would_delete", p, size)
-            print(f"  · would delete (sudo): {p}")
-            continue
-        r = sudo.run(["rm", "-rf", p])
-        if r.returncode == 0:
-            deleter.auditor.write("app_remove", "deleted", p, size)
-            print(f"  ✓ deleted (sudo): {p}")
-        else:
-            deleter.auditor.write("app_remove", "failed", p, size)
-            print(f"  ✗ failed (sudo): {p} ({r.stderr.strip()})")
+    deleter.delete("app_remove", sys_paths, sudo=sudo)
     return 0
 
 

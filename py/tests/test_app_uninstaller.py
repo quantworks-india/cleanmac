@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import plistlib
+from pathlib import Path
 
 import pytest
 
@@ -92,6 +93,53 @@ def test_remove_dry_run_does_not_delete(fake_home):
     assert rc == 0
     # fake app still there
     assert (fake_home / "home" / "Applications" / "MyApp.app").exists()
+    aud.close()
+
+
+def test_remove_routes_system_paths_through_deleter(fake_home, monkeypatch):
+    """System paths must be deleted via Deleter.delete, not direct sudo rm."""
+    from subprocess import CompletedProcess
+
+    from maccleaner.core import Auditor, Deleter
+
+    sys_path = str(fake_home / "home" / "Library" / "Caches" / "com.example.myapp")
+    Path(sys_path).mkdir(parents=True, exist_ok=True)
+    Path(sys_path + "/data").write_text("x")
+    # Isolate system-path flow: user paths empty, only system path mocked
+    monkeypatch.setattr(au, "_user_paths", lambda app: [])
+    monkeypatch.setattr(au, "_system_paths", lambda app: [sys_path])
+
+    aud = Auditor("app-sys", mode="dry-run")
+    d = Deleter(aud, commit=False)
+
+    delete_calls: list[list[str]] = []
+    original_delete = d.delete
+
+    def tracking_delete(step, paths, *args, **kwargs):
+        delete_calls.append(list(paths))
+        return original_delete(step, paths)
+
+    d.delete = tracking_delete  # type: ignore[assignment]
+
+    sudo_calls: list[list[str]] = []
+
+    class TrackingSudo:
+        def ensure(self) -> bool:
+            return True
+
+        def run(self, args: list[str]) -> CompletedProcess:
+            sudo_calls.append(list(args))
+            return CompletedProcess(args, 0, "", "")
+
+    rc = au._run_remove(
+        type("A", (), {"app": "myapp", "force": False})(), d, TrackingSudo()
+    )
+    assert rc == 0
+
+    all_deleted = [p for paths in delete_calls for p in paths]
+    assert sys_path in all_deleted, "system path not routed through Deleter.delete"
+    rm_calls = [c for c in sudo_calls if c and c[0] == "rm"]
+    assert rm_calls == [], f"direct sudo rm call detected: {rm_calls}"
     aud.close()
 
 
