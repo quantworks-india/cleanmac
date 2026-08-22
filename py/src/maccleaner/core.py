@@ -16,11 +16,13 @@ import os
 import shutil
 import subprocess
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
-STATE_DIR = Path(os.environ.get("CLEANMAC_STATE_DIR", Path.home() / ".local/state/cleanmac"))
+STATE_DIR = Path(
+    os.environ.get("CLEANMAC_STATE_DIR", Path.home() / ".local/state/cleanmac")
+)
 LOG_DIR = STATE_DIR / "logs"
 AUDIT_DIR = STATE_DIR / "audit"
 

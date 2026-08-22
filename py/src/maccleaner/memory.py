@@ -100,7 +100,9 @@ def _run_heavy() -> int:
         except ValueError:
             print(f"Invalid PID: {pid_str}")
             return 0
-        kr = subprocess.run(["kill", str(pid)], capture_output=True, text=True, check=False)
+        kr = subprocess.run(
+            ["kill", str(pid)], capture_output=True, text=True, check=False
+        )
         if kr.returncode == 0:
             print(f"  ✓ sent TERM to {pid}")
         else:

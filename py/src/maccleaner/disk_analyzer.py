@@ -12,7 +12,6 @@ import json
 import os
 import stat
 import subprocess
-import threading
 from pathlib import Path
 
 NETWORK_MOUNT_TYPES = {"nfs", "smbfs", "afpfs", "webdav", "autofs", "cifs"}
@@ -29,7 +28,9 @@ def _network_mount_points() -> set[str]:
             parts = line.split(" on ")
             if len(parts) < 2:
                 continue
-            fstype = parts[0].split(",")[-1] if "," in parts[0] else parts[0].split()[-1]
+            fstype = (
+                parts[0].split(",")[-1] if "," in parts[0] else parts[0].split()[-1]
+            )
             if any(t in fstype for t in NETWORK_MOUNT_TYPES):
                 mp = parts[1].split(" (")[0].strip()
                 mounts.add(mp)
@@ -71,9 +72,7 @@ def _walk(root: str) -> list[dict]:
                 if entry.path in net_mounts:
                     continue
                 stack.append(entry.path)
-                results.append(
-                    {"path": entry.path, "size": st.st_size, "is_dir": True}
-                )
+                results.append({"path": entry.path, "size": st.st_size, "is_dir": True})
             elif stat.S_ISREG(st.st_mode):
                 results.append(
                     {"path": entry.path, "size": st.st_size, "is_dir": False}
@@ -200,9 +199,12 @@ def _build_treemap_json(sizes: dict[str, int], root: str) -> dict:
     def node(path: str) -> dict:
         children: list[dict] = []
         for child_path, child_size in sizes.items():
-            if os.path.dirname(child_path) == path and child_size > 0:
-                if sizes.get(child_path, 0) > 0 or os.path.isdir(child_path):
-                    children.append(node(child_path))
+            if (
+                os.path.dirname(child_path) == path
+                and child_size > 0
+                and (sizes.get(child_path, 0) > 0 or os.path.isdir(child_path))
+            ):
+                children.append(node(child_path))
         return {
             "name": os.path.basename(path) or path,
             "path": path,

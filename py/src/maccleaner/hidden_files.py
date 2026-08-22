@@ -22,7 +22,9 @@ def _toggle(value: bool) -> int:
     if r.returncode != 0:
         print(f"defaults write failed: {r.stderr.strip()}")
         return 1
-    kr = subprocess.run(["killall", "Finder"], capture_output=True, text=True, check=False)
+    kr = subprocess.run(
+        ["killall", "Finder"], capture_output=True, text=True, check=False
+    )
     if kr.returncode != 0:
         print(f"killall Finder failed: {kr.stderr.strip()}")
         return 1

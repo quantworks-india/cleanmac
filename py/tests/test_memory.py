@@ -6,7 +6,6 @@ from subprocess import CompletedProcess
 
 from maccleaner import memory
 
-
 VM_STAT_OUTPUT = """\
 Mach Virtual Memory Statistics: (page size of 16384 bytes)
 Pages free:                             100.

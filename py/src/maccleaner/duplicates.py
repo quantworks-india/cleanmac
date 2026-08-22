@@ -21,10 +21,21 @@ from maccleaner.core import Deleter
 
 HASH_BUFFER = 1024 * 1024
 DHASH_THRESHOLD = 10
-PHOTO_EXTS = frozenset({
-    ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp",
-    ".gif", ".heic", ".heif", ".webp", ".raw",
-})
+PHOTO_EXTS = frozenset(
+    {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".tif",
+        ".tiff",
+        ".bmp",
+        ".gif",
+        ".heic",
+        ".heif",
+        ".webp",
+        ".raw",
+    }
+)
 
 
 def _parse_size(s: str) -> int:

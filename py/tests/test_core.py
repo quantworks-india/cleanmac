@@ -12,7 +12,6 @@ from maccleaner import core
 from maccleaner.core import (
     Auditor,
     Deleter,
-    PROTECTED_ROOTS,
     is_safe_path,
     size_human,
 )

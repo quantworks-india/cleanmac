@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import os
-from pathlib import Path
-
 import pytest
 
 from maccleaner import disk_analyzer as da
@@ -32,7 +28,7 @@ def test_scan_total_size(tree):
 
 def test_walk_skips_symlink_loop(tree):
     (tree / "loop").symlink_to(tree, target_is_directory=True)
-    sizes, total = da.scan(str(tree))
+    _sizes, total = da.scan(str(tree))
     assert total == 350  # symlink loop not followed
 
 
@@ -51,7 +47,7 @@ def test_report_creates_self_contained_html(tree, tmp_path):
     assert out.exists()
     content = out.read_text()
     assert "<!DOCTYPE html>" in content
-    assert "<div id=\"map\">" in content
+    assert '<div id="map">' in content
     assert "Disk Treemap" in content
     # treemap JSON includes all nodes (files + dir) as tiles
     assert "file1.txt" in content
