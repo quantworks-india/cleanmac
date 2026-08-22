@@ -229,3 +229,31 @@ def test_similar_photos_groups_similar(isolated_home, capsys):
     assert "img2" in out
     assert "img3" not in out
     aud.close()
+
+
+def test_scan_reuses_stat_from_walk(isolated_home, monkeypatch):
+    """_run_scan should not call os.stat again on files already lstat'd in the walk."""
+    d = isolated_home / "data"
+    d.mkdir()
+    (d / "a.txt").write_bytes(b"hello world" * 100)
+    (d / "b.txt").write_bytes(b"hello world" * 100)
+
+    stat_calls: list[str] = []
+    original_stat = os.stat
+
+    def counting_stat(p, *args, **kw):
+        stat_calls.append(p)
+        return original_stat(p, *args, **kw)
+
+    monkeypatch.setattr(dup.os, "stat", counting_stat)
+
+    aud = Auditor("scan-stat", mode="dry-run")
+    deleter = Deleter(aud, commit=False)
+    rc = dup.run(_scan_args(str(d)), deleter)
+    assert rc == 0
+    aud.close()
+
+    file_stats = [c for c in stat_calls if "a.txt" in str(c) or "b.txt" in str(c)]
+    assert file_stats == [], (
+        f"os.stat called again on already-walked files: {file_stats}"
+    )
