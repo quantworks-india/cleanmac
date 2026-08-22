@@ -123,29 +123,31 @@ def _size_b(b: int) -> str:
     return f"{b / (1024 * 1024 * 1024):.2f}G"
 
 
-def _run_scan(args) -> int:
+def _run_scan(args, reporter: Reporter) -> int:
     sizes, total = scan(args.dir)
-    print(f"Scan of {args.dir}: {_size_b(total)}")
-    for path, size in top_largest(sizes, 10):
-        if path == os.path.realpath(args.dir):
-            continue
-        print(f"  {_size_b(size):>10}  {path}")
+    top = [(p, s) for p, s in top_largest(sizes, 10) if p != os.path.realpath(args.dir)]
+    reporter.info(
+        "disk_scan",
+        path=args.dir,
+        total_bytes=total,
+        top=[{"path": p, "size_bytes": s} for p, s in top],
+    )
     return 0
 
 
-def _run_top(args) -> int:
-    # top requires a scan; default to home
+def _run_top(args, reporter: Reporter) -> int:
     target = getattr(args, "dir", None) or str(Path.home())
     sizes, _ = scan(target)
-    print(f"Top 25 largest under {target}:")
-    for i, (path, size) in enumerate(top_largest(sizes, 25), 1):
-        if size == 0:
-            continue
-        print(f"  {i:>2}. {_size_b(size):>10}  {path}")
+    items = [(i, p, s) for i, (p, s) in enumerate(top_largest(sizes, 25), 1) if s != 0]
+    reporter.info(
+        "disk_top",
+        path=target,
+        items=[{"rank": i, "path": p, "size_bytes": s} for i, p, s in items],
+    )
     return 0
 
 
-def _run_summary(args) -> int:
+def _run_summary(args, reporter: Reporter) -> int:
     target = getattr(args, "dir", None) or str(Path.home())
     sizes, _ = scan(target)
     root = os.path.realpath(target)
@@ -154,13 +156,19 @@ def _run_summary(args) -> int:
         key=lambda kv: kv[1],
         reverse=True,
     )
-    print(f"Top-level breakdown of {target} ({_size_b(sum(s for _, s in top))}):")
-    for path, size in top:
-        print(f"  {_size_b(size):>10}  {os.path.basename(path) or path}")
+    reporter.info(
+        "disk_summary",
+        path=target,
+        total_bytes=sum(s for _, s in top),
+        items=[
+            {"path": p, "name": os.path.basename(p) or p, "size_bytes": s}
+            for p, s in top
+        ],
+    )
     return 0
 
 
-def _run_system_data(args) -> int:
+def _run_system_data(args, reporter: Reporter) -> int:
     home = Path(os.environ.get("CLEANMAC_HOME", Path.home()))
     targets = {
         "User caches": home / "Library/Caches",
@@ -174,12 +182,11 @@ def _run_system_data(args) -> int:
         "pip cache": home / "Library/Caches/pip",
         "iOS backups": home / "Library/Application Support/MobileSync/Backup",
     }
-    print("System data breakdown:")
+    items = []
     total = 0
     for label, p in targets.items():
         if not p.exists():
             continue
-        # size via du (fast, handles symlinks/SIP)
         try:
             out = subprocess.run(
                 ["du", "-sk", str(p)], capture_output=True, text=True, check=False
@@ -189,8 +196,8 @@ def _run_system_data(args) -> int:
             kb = 0
         if kb > 0:
             total += kb
-            print(f"  {_size_b(kb * 1024):>10}  {label}  ({p})")
-    print(f"  Total: {_size_b(total * 1024)}")
+            items.append({"label": label, "path": str(p), "size_bytes": kb * 1024})
+    reporter.info("system_data", total_bytes=total * 1024, items=items)
     return 0
 
 
@@ -234,7 +241,7 @@ def _build_treemap_json(sizes: dict[str, int], root: str) -> dict:
     }
 
 
-def _run_report(args) -> int:
+def _run_report(args, reporter: Reporter) -> int:
     sizes, _ = scan(args.dir)
     treemap = _build_treemap_json(sizes, args.dir)
     # simple squarified-ish treemap in JS, self-contained
@@ -318,19 +325,19 @@ render(root);
 </body>
 </html>"""
     Path(out).write_text(html_body, encoding="utf-8")
-    print(f"Report written to {out}")
+    reporter.info("report_written", path=out)
     return 0
 
 
 def run(args, reporter: Reporter) -> int:
     if args.disk_cmd == "scan":
-        return _run_scan(args)
+        return _run_scan(args, reporter)
     if args.disk_cmd == "top":
-        return _run_top(args)
+        return _run_top(args, reporter)
     if args.disk_cmd == "summary":
-        return _run_summary(args)
+        return _run_summary(args, reporter)
     if args.disk_cmd == "system-data":
-        return _run_system_data(args)
+        return _run_system_data(args, reporter)
     if args.disk_cmd == "report":
-        return _run_report(args)
+        return _run_report(args, reporter)
     return 2

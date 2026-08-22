@@ -90,7 +90,9 @@ def test_remove_dry_run_does_not_delete(fake_home):
 
     aud = Auditor("app-dry", mode="dry-run")
     d = Deleter(aud, commit=False)
-    rc = au._run_remove(type("A", (), {"app": "myapp", "force": False})(), d, None)
+    rc = au._run_remove(
+        type("A", (), {"app": "myapp", "force": False})(), d, None, Reporter()
+    )
     assert rc == 0
     # fake app still there
     assert (fake_home / "home" / "Applications" / "MyApp.app").exists()
@@ -133,7 +135,7 @@ def test_remove_routes_system_paths_through_deleter(fake_home, monkeypatch):
             return CompletedProcess(args, 0, "", "")
 
     rc = au._run_remove(
-        type("A", (), {"app": "myapp", "force": False})(), d, TrackingSudo()
+        type("A", (), {"app": "myapp", "force": False})(), d, TrackingSudo(), Reporter()
     )
     assert rc == 0
 
@@ -162,7 +164,9 @@ def test_remove_no_leftovers_exits_early(fake_home):
 
         aud = Auditor("app-empty", mode="dry-run")
         d = Deleter(aud, commit=False)
-        rc = au._run_remove(type("A", (), {"app": "myapp", "force": False})(), d, None)
+        rc = au._run_remove(
+            type("A", (), {"app": "myapp", "force": False})(), d, None, Reporter()
+        )
         assert rc == 0
         aud.close()
     finally:
@@ -171,7 +175,7 @@ def test_remove_no_leftovers_exits_early(fake_home):
 
 def test_run_dispatches_app_remove(fake_home, monkeypatch):
     """run() with app_cmd='remove' calls _run_remove."""
-    monkeypatch.setattr(au, "_run_remove", lambda args, d, s: 42)
+    monkeypatch.setattr(au, "_run_remove", lambda args, d, s, r: 42)
     args = type(
         "A",
         (),
@@ -187,7 +191,7 @@ def test_run_dispatches_app_remove(fake_home, monkeypatch):
 
 
 def test_run_dispatches_app_startup(fake_home, monkeypatch):
-    monkeypatch.setattr(au, "_run_startup", lambda args, s: 5)
+    monkeypatch.setattr(au, "_run_startup", lambda args, s, r: 5)
     args = type("A", (), {"app_cmd": "startup", "action": "list"})()
     from maccleaner.core import Auditor, Deleter
 

@@ -47,21 +47,24 @@ def _free_bytes() -> int:
     return _parse_vm_stat(r.stdout)
 
 
-def _run_free(sudo: Sudo) -> int:
+def _run_free(sudo: Sudo, reporter: Reporter) -> int:
     if not sudo.ensure():
-        print("sudo is required to purge memory")
+        reporter.error("sudo_required")
         return 1
     before = _free_bytes()
     r = sudo.run(["purge"])
     if r.returncode != 0:
-        print(f"purge failed: {r.stderr.strip()}")
+        reporter.error("purge_failed", stderr=r.stderr.strip())
         return 1
     after = _free_bytes()
     before_kb = before // 1024
     after_kb = after // 1024
-    print(f"Free memory before: {size_human(before_kb)}")
-    print(f"Free memory after:  {size_human(after_kb)}")
-    print(f"Freed:              {size_human(abs(after_kb - before_kb))}")
+    reporter.info(
+        "mem_free",
+        before=size_human(before_kb),
+        after=size_human(after_kb),
+        freed=size_human(abs(after_kb - before_kb)),
+    )
     return 0
 
 
@@ -81,18 +84,18 @@ def _parse_ps(output: str) -> list[Proc]:
     return procs
 
 
-def _run_heavy() -> int:
+def _run_heavy(reporter: Reporter) -> int:
     r = subprocess.run(
         ["ps", "-eo", "pid,rss,comm"], capture_output=True, text=True, check=False
     )
     if r.returncode != 0:
-        print(f"ps failed: {r.stderr.strip()}")
+        reporter.error("ps_failed", stderr=r.stderr.strip())
         return 1
     procs = _parse_ps(r.stdout)
     procs.sort(key=lambda p: p.rss, reverse=True)
-    print(f"{'PID':>8} {'RSS':>10} COMMAND")
+    reporter.info("heavy_header", columns=["PID", "RSS", "COMMAND"])
     for p in procs[:10]:
-        print(f"{p.pid:>8} {size_human(p.rss):>10} {p.comm}")
+        reporter.info("heavy_row", pid=p.pid, rss=size_human(p.rss), comm=p.comm)
     if sys.stdin.isatty() and confirm("Quit a process by PID?"):
         try:
             pid_str = input("PID to kill: ").strip()
@@ -101,24 +104,24 @@ def _run_heavy() -> int:
         try:
             pid = int(pid_str)
         except ValueError:
-            print(f"Invalid PID: {pid_str}")
+            reporter.warn("invalid_pid", value=pid_str)
             return 0
         if pid in PROTECTED_PIDS:
-            print(f"  ✗ refused (protected PID {pid})")
+            reporter.warn("protected_pid", pid=pid)
             return 0
         kr = subprocess.run(
             ["kill", str(pid)], capture_output=True, text=True, check=False
         )
         if kr.returncode == 0:
-            print(f"  ✓ sent TERM to {pid}")
+            reporter.info("kill_sent", pid=pid)
         else:
-            print(f"  ✗ failed: {kr.stderr.strip()}")
+            reporter.error("kill_failed", pid=pid, stderr=kr.stderr.strip())
     return 0
 
 
 def run(args, sudo: Sudo, reporter: Reporter) -> int:
     if args.mem_cmd == "free":
-        return _run_free(sudo)
+        return _run_free(sudo, reporter)
     if args.mem_cmd == "heavy":
-        return _run_heavy()
+        return _run_heavy(reporter)
     return 2

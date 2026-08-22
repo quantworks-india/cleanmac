@@ -14,6 +14,7 @@ import stat
 import struct
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from maccleaner import core
@@ -140,13 +141,14 @@ def _hash_file(path: str, st: os.stat_result, algo: str, db) -> str | None:
     return h
 
 
-def _run_scan(args, deleter: Deleter) -> int:
+def _run_scan(args, deleter: Deleter, reporter: Reporter) -> int:
     root = args.dir
     if not os.path.isdir(root):
         raise SystemExit(f"Not a directory: {root}")
     min_size = _parse_size(args.min_size)
     algo = args.hash
 
+    t0 = time.perf_counter()
     by_size: dict[int, list[tuple[str, os.stat_result]]] = {}
     seen_inodes: set[tuple[int, int]] = set()
     stats: dict[str, os.stat_result] = {}
@@ -186,18 +188,25 @@ def _run_scan(args, deleter: Deleter) -> int:
         reclaimable = sum(stats[p].st_size for p in to_delete)
         total_dupes += len(to_delete)
         total_reclaimable += reclaimable
-        print(
-            f"\nDuplicate group ({len(group)} files, "
-            f"{_size_b(reclaimable)} reclaimable):"
+        reporter.info(
+            "duplicate_group",
+            files=len(group),
+            reclaimable_bytes=reclaimable,
+            keep=keep,
+            delete=to_delete,
         )
-        print(f"  keep:    {keep}")
-        for p in to_delete:
-            print(f"  delete:  {p}")
         deleter.delete("dup_scan", to_delete)
 
-    print(
-        f"\n{len(groups)} duplicate groups, {total_dupes} redundant files, "
-        f"{_size_b(total_reclaimable)} reclaimable"
+    duration_ms = int((time.perf_counter() - t0) * 1000)
+    deleter.auditor.write(
+        "dup_scan", "completed", root, total_reclaimable, duration_ms=duration_ms
+    )
+    reporter.info(
+        "dup_scan_complete",
+        groups=len(groups),
+        duplicates=total_dupes,
+        reclaimable_bytes=total_reclaimable,
+        duration_ms=duration_ms,
     )
     return 0
 
@@ -315,7 +324,7 @@ def _group_similar(
     return list(groups.values())
 
 
-def _run_similar_photos(args, deleter: Deleter) -> int:
+def _run_similar_photos(args, deleter: Deleter, reporter: Reporter) -> int:
     root = args.dir
     if not os.path.isdir(root):
         raise SystemExit(f"Not a directory: {root}")
@@ -337,15 +346,13 @@ def _run_similar_photos(args, deleter: Deleter) -> int:
         if len(group) < 2:
             continue
         printed += 1
-        print(f"\nSimilar photo group ({len(group)} images):")
-        for p in group:
-            print(f"  {p}")
+        reporter.info("similar_photo_group", files=len(group), paths=group)
     if printed == 0:
-        print("No similar photos found.")
+        reporter.info("no_similar_photos_found")
     return 0
 
 
-def _run_merge_folders(args, deleter: Deleter) -> int:
+def _run_merge_folders(args, deleter: Deleter, reporter: Reporter) -> int:
     a = args.a
     b = args.b
     if not os.path.isdir(a):
@@ -363,22 +370,22 @@ def _run_merge_folders(args, deleter: Deleter) -> int:
                 continue
             dst = os.path.join(a, rel, name) if rel != "." else os.path.join(a, name)
             if os.path.exists(dst):
-                print(f"  conflict: {src} <-> {dst}")
+                reporter.warn("merge_conflict", src=src, dst=dst)
                 conflicts += 1
             else:
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 shutil.move(src, dst)
-                print(f"  moved: {src} -> {dst}")
+                reporter.info("merge_moved", src=src, dst=dst)
                 moved += 1
-    print(f"\n{moved} moved, {conflicts} conflicts")
+    reporter.info("merge_summary", moved=moved, conflicts=conflicts)
     return 0
 
 
 def run(args, deleter: Deleter, reporter: Reporter) -> int:
     if args.dup_cmd == "scan":
-        return _run_scan(args, deleter)
+        return _run_scan(args, deleter, reporter)
     if args.dup_cmd == "similar-photos":
-        return _run_similar_photos(args, deleter)
+        return _run_similar_photos(args, deleter, reporter)
     if args.dup_cmd == "merge-folders":
-        return _run_merge_folders(args, deleter)
+        return _run_merge_folders(args, deleter, reporter)
     return 2

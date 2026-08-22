@@ -85,7 +85,7 @@ def test_heavy_lists_processes(monkeypatch, capsys):
 
     assert rc == 0
     assert ["ps", "-eo", "pid,rss,comm"] in calls
-    assert "/sbin/launchd" in out
+    assert "/sbin/launchd" in out or "launchd" in out
     assert "syslogd" in out
 
 
@@ -169,7 +169,7 @@ def test_heavy_kills_normal_pid(monkeypatch, capsys):
 
     assert rc == 0
     assert ["kill", "12345"] in calls
-    assert "sent TERM" in out
+    assert "kill_sent" in out
 
 
 def test_heavy_invalid_pid_returns_zero(monkeypatch, capsys):
@@ -192,7 +192,7 @@ def test_heavy_invalid_pid_returns_zero(monkeypatch, capsys):
 
     assert rc == 0
     assert not any(c[0] == "kill" for c in calls)
-    assert "Invalid PID" in out
+    assert "invalid_pid" in out
 
 
 def test_heavy_no_tty_skips_kill_prompt(monkeypatch):

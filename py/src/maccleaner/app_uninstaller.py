@@ -152,23 +152,25 @@ def _system_paths(app: AppInfo) -> list[str]:
     return sorted(set(found))
 
 
-def _run_remove(args, deleter: Deleter, sudo: Sudo) -> int:
+def _run_remove(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
     app = _find_app(args.app, force=args.force)
-    print(f"App: {app.name} ({app.bundle_id}) — {dir_size_kb(app.path)}K")
-    print("Leftovers (user):")
+    reporter.info(
+        "app_found",
+        name=app.name,
+        bundle_id=app.bundle_id,
+        path=app.path,
+        size_kb=dir_size_kb(app.path),
+    )
     user = _user_paths(app)
-    for p in user:
-        print(f"  · {p}")
-    print("Leftovers (system, sudo):")
+    reporter.info("user_leftovers", count=len(user), paths=user)
     sys_paths = _system_paths(app)
-    for p in sys_paths:
-        print(f"  · {p}")
+    reporter.info("system_leftovers", count=len(sys_paths), paths=sys_paths)
 
     if not user and not sys_paths:
-        print("No leftovers found.")
+        reporter.info("no_leftovers_found")
         return 0
 
-    print("\nDeleting app bundle + leftovers:")
+    reporter.info("app_remove_started", bundle=app.path)
     deleter.delete("app_remove", [app.path])
     deleter.delete("app_remove", user)
     deleter.delete("app_remove", sys_paths, sudo=sudo)
@@ -189,21 +191,21 @@ def _scope_for_path(path: str) -> str:
     return "user"
 
 
-def _run_startup(args, sudo: Sudo) -> int:
+def _run_startup(args, sudo: Sudo, reporter: Reporter) -> int:
     if args.action == "list":
-        return _startup_list()
+        return _startup_list(reporter)
     if args.action == "disable":
-        return _startup_disable(args.label, sudo)
+        return _startup_disable(args.label, sudo, reporter)
     return 2
 
 
-def _startup_list() -> int:
+def _startup_list(reporter: Reporter) -> int:
     dirs = [
         Path.home() / "Library/LaunchAgents",
         Path("/Library/LaunchAgents"),
         Path("/Library/LaunchDaemons"),
     ]
-    print(f"{'Label':<48} {'Scope':<8} {'State':<8} Path")
+    reporter.info("startup_list_header", columns=["Label", "Scope", "State", "Path"])
     for d in dirs:
         if not d.is_dir():
             continue
@@ -225,15 +227,16 @@ def _startup_list() -> int:
                     check=False,
                 )
                 state = "running" if r.returncode == 0 else "stopped"
-            print(f"{label:<48} {scope:<8} {state:<8} {plist}")
+            reporter.info(
+                "startup_item", label=label, scope=scope, state=state, path=str(plist)
+            )
     return 0
 
 
-def _startup_disable(label: str, sudo: Sudo) -> int:
+def _startup_disable(label: str, sudo: Sudo, reporter: Reporter) -> int:
     if not label:
-        print("Usage: cleanmac app startup disable <label>")
+        reporter.error("usage", msg="cleanmac app startup disable <label>")
         return 2
-    # find the plist
     candidates = [
         Path.home() / "Library/LaunchAgents" / f"{label}.plist",
         Path("/Library/LaunchAgents") / f"{label}.plist",
@@ -241,16 +244,19 @@ def _startup_disable(label: str, sudo: Sudo) -> int:
     ]
     plist_path = next((p for p in candidates if p.exists()), None)
     if not plist_path:
-        print(f"LaunchAgent not found: {label}")
+        reporter.error("launchagent_not_found", label=label)
         return 1
 
     target = Path.home() / "Library/LaunchAgents-disabled"
     target.mkdir(parents=True, exist_ok=True)
 
-    # 1. stop now (modern launchctl API — audit MAJOR-3)
     if "LaunchDaemons" in str(plist_path):
         r = sudo.run(["launchctl", "bootout", f"system/{label}"])
-        print("  bootout system:", "ok" if r.returncode == 0 else r.stderr.strip())
+        reporter.info(
+            "bootout_system",
+            ok=r.returncode == 0,
+            stderr=r.stderr.strip() if r.returncode != 0 else None,
+        )
     else:
         r = subprocess.run(
             ["launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
@@ -258,66 +264,71 @@ def _startup_disable(label: str, sudo: Sudo) -> int:
             text=True,
             check=False,
         )
-        print("  bootout gui:", "ok" if r.returncode == 0 else r.stderr.strip())
+        reporter.info(
+            "bootout_gui",
+            ok=r.returncode == 0,
+            stderr=r.stderr.strip() if r.returncode != 0 else None,
+        )
 
-    # 2. move to disabled dir to prevent next login
     dest = target / plist_path.name
     plist_path.rename(dest)
-    print(f"  ✓ moved to {dest}")
+    reporter.info("moved_to_disabled", dest=str(dest))
     return 0
 
 
-def _run_extensions() -> int:
+def _run_extensions(reporter: Reporter) -> int:
     chrome = (
         Path.home() / "Library/Application Support/Google/Chrome/Default/Extensions"
     )
     safari = Path.home() / "Library/Containers/com.apple.Safari"
     ff = Path.home() / "Library/Application Support/Firefox/Profiles"
-    print("Chrome extensions:")
-    if chrome.is_dir():
-        for e in sorted(chrome.iterdir()):
-            print(f"  · {e.name}")
-    else:
-        print("  (none)")
-    print("Safari app extensions:")
-    if safari.is_dir():
-        for e in sorted(safari.glob("Extensions/*")):
-            print(f"  · {e.name}")
-    else:
-        print("  (none)")
-    print("Firefox profiles:")
-    if ff.is_dir():
-        for prof in sorted(ff.iterdir()):
-            print(f"  · {prof.name}")
-    else:
-        print("  (none)")
+    chrome_exts = sorted([e.name for e in chrome.iterdir()]) if chrome.is_dir() else []
+    safari_exts = (
+        sorted([e.name for e in safari.glob("Extensions/*")]) if safari.is_dir() else []
+    )
+    ff_profiles = sorted([prof.name for prof in ff.iterdir()]) if ff.is_dir() else []
+    reporter.info(
+        "extensions_list",
+        chrome=chrome_exts,
+        safari=safari_exts,
+        firefox=ff_profiles,
+    )
     return 0
 
 
-def _run_update() -> int:
-    print("Outdated App Store apps (mas):")
-    r = subprocess.run(["mas", "outdated"], capture_output=True, text=True, check=False)
-    print(r.stdout.strip() or "  (mas not installed or up to date)")
-    print("Outdated Homebrew casks:")
-    r = subprocess.run(
+def _run_update(reporter: Reporter) -> int:
+    mas = subprocess.run(
+        ["mas", "outdated"], capture_output=True, text=True, check=False
+    )
+    brew = subprocess.run(
         ["brew", "outdated", "--cask"], capture_output=True, text=True, check=False
     )
-    print(r.stdout.strip() or "  (brew not installed or up to date)")
+    reporter.info(
+        "outdated_apps",
+        mas=mas.stdout.strip(),
+        brew=brew.stdout.strip(),
+    )
     return 0
 
 
 def run(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
     if args.app_cmd == "list":
         apps = list_apps()
-        print(f"{'Name':<32} {'Bundle ID':<42} {'Size':>10}")
-        for a in apps:
-            print(
-                f"{a.name[:30]:<32} {(a.bundle_id or '')[:40]:<42} {dir_size_kb(a.path):>9}K"
-            )
-        print(f"\n{len(apps)} apps")
+        reporter.info(
+            "apps_list",
+            count=len(apps),
+            apps=[
+                {
+                    "name": a.name,
+                    "bundle_id": a.bundle_id,
+                    "size_kb": dir_size_kb(a.path),
+                }
+                for a in apps
+            ],
+        )
         return 0
     if args.app_cmd == "remove":
-        return _run_remove(args, deleter, sudo)
+        return _run_remove(args, deleter, sudo, reporter)
     if args.app_cmd == "reset":
         app = _find_app(args.app)
         home = Path(os.environ.get("CLEANMAC_HOME", Path.home()))
@@ -327,9 +338,9 @@ def run(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
         deleter.delete("app_reset", paths)
         return 0
     if args.app_cmd == "startup":
-        return _run_startup(args, sudo)
+        return _run_startup(args, sudo, reporter)
     if args.app_cmd == "extensions":
-        return _run_extensions()
+        return _run_extensions(reporter)
     if args.app_cmd == "update":
-        return _run_update()
+        return _run_update(reporter)
     return 2

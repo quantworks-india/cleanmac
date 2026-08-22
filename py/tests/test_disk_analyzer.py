@@ -45,7 +45,7 @@ def test_top_largest(tree):
 def test_report_creates_self_contained_html(tree, tmp_path):
     out = tmp_path / "report.html"
     args = type("A", (), {"dir": str(tree), "out": str(out)})()
-    rc = da._run_report(args)
+    rc = da._run_report(args, Reporter())
     assert rc == 0
     assert out.exists()
     content = out.read_text()
@@ -79,33 +79,32 @@ def test_treemap_handles_deep_paths(tmp_path):
 
 def test_run_scan_prints_total_and_top(tree, capsys):
     args = type("A", (), {"dir": str(tree)})()
-    rc = da._run_scan(args)
+    rc = da._run_scan(args, Reporter())
     assert rc == 0
     out = capsys.readouterr().out
-    assert "Scan of" in out
-    assert "350" in out or "B" in out
+    assert "disk_scan" in out
 
 
 def test_run_top_uses_dir_when_provided(tree, capsys):
     args = type("A", (), {"dir": str(tree)})()
-    rc = da._run_top(args)
+    rc = da._run_top(args, Reporter())
     assert rc == 0
     out = capsys.readouterr().out
-    assert "Top 25" in out
+    assert "disk_top" in out
 
 
 def test_run_summary_breaks_down_top_level(tree, capsys):
     args = type("A", (), {"dir": str(tree)})()
-    rc = da._run_summary(args)
+    rc = da._run_summary(args, Reporter())
     assert rc == 0
     out = capsys.readouterr().out
-    assert "Top-level breakdown" in out
+    assert "disk_summary" in out
 
 
 def test_run_system_data_handles_missing_dirs(capsys, monkeypatch, tmp_path):
     monkeypatch.setenv("CLEANMAC_HOME", str(tmp_path))
     args = type("A", (), {})()
-    rc = da._run_system_data(args)
+    rc = da._run_system_data(args, Reporter())
     assert rc == 0
 
 

@@ -63,7 +63,8 @@ def test_scan_ignores_different_files(isolated_home, capsys):
     rc = dup.run(_scan_args(str(d)), deleter, Reporter())
     assert rc == 0
     out = capsys.readouterr().out
-    assert "0 duplicate groups" in out
+    assert "dup_scan_complete" in out
+    assert "groups=0" in out
     aud.close()
 
 
@@ -96,7 +97,8 @@ def test_scan_skips_hard_links(isolated_home, capsys):
     deleter = Deleter(aud, commit=False)
     dup.run(_scan_args(str(d)), deleter, Reporter())
     out = capsys.readouterr().out
-    assert "0 duplicate groups" in out
+    assert "dup_scan_complete" in out
+    assert "groups=0" in out
     aud.close()
 
 
@@ -110,7 +112,8 @@ def test_scan_skips_symlinks(isolated_home, capsys):
     deleter = Deleter(aud, commit=False)
     dup.run(_scan_args(str(d)), deleter, Reporter())
     out = capsys.readouterr().out
-    assert "0 duplicate groups" in out
+    assert "dup_scan_complete" in out
+    assert "groups=0" in out
     aud.close()
 
 
