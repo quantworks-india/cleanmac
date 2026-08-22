@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from subprocess import CompletedProcess
 
+import pytest
+
 from maccleaner import memory
 
 VM_STAT_OUTPUT = """\
@@ -117,3 +119,29 @@ def test_free_fails_without_sudo():
     rc = memory.run(args, sudo)
     assert rc == 1
     assert sudo.runs == []
+
+
+@pytest.mark.parametrize("pid_str", ["0", "1", "2"])
+def test_heavy_refuses_kill_of_critical_pid(pid_str, monkeypatch, capsys):
+    """Critical PIDs (0=init, 1=launchd, 2=kernel) must never be killed."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kw):
+        calls.append(list(cmd))
+        if cmd[0] == "ps":
+            return CompletedProcess(cmd, 0, PS_OUTPUT, "")
+        return CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(memory.subprocess, "run", fake_run)
+    monkeypatch.setattr(memory, "confirm", lambda *a, **kw: True)
+    monkeypatch.setattr(memory.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a, **kw: pid_str)
+
+    args = type("A", (), {"mem_cmd": "heavy"})()
+    rc = memory.run(args, FakeSudo())
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    kill_calls = [c for c in calls if c[0] == "kill"]
+    assert kill_calls == [], f"kill was called for protected PID {pid_str}"
+    assert "refused" in out.lower() or "protected" in out.lower()
