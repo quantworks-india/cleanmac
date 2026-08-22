@@ -257,3 +257,9 @@ def test_scan_reuses_stat_from_walk(isolated_home, monkeypatch):
     assert file_stats == [], (
         f"os.stat called again on already-walked files: {file_stats}"
     )
+
+
+def test_group_similar_docstring_notes_complexity():
+    """_group_similar is O(n²); the docstring should say so."""
+    doc = dup._group_similar.__doc__ or ""
+    assert any(w in doc.lower() for w in ("o(n²)", "quadratic", "pairwise"))

@@ -283,6 +283,13 @@ def _hamming(a: int, b: int) -> int:
 def _group_similar(
     hashes: list[tuple[str, int]], threshold: int = DHASH_THRESHOLD
 ) -> list[list[str]]:
+    """Group similar images by dHash hamming distance.
+
+    Uses union-find to merge pairs whose hamming distance is within
+    *threshold*.  Complexity is O(n²) pairwise — acceptable for typical
+    photo collections but may be slow on directories with thousands of
+    images.
+    """
     n = len(hashes)
     parent = list(range(n))
 
