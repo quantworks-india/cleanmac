@@ -61,19 +61,21 @@ class AuditRecord:
     action: str
     path: str
     size_bytes: int
+    duration_ms: int | None = None
 
     def to_json(self) -> str:
-        return json.dumps(
-            {
-                "ts": self.ts,
-                "run": self.run,
-                "mode": self.mode,
-                "step": self.step,
-                "action": self.action,
-                "path": self.path,
-                "size_bytes": self.size_bytes,
-            }
-        )
+        d: dict[str, str | int | None] = {
+            "ts": self.ts,
+            "run": self.run,
+            "mode": self.mode,
+            "step": self.step,
+            "action": self.action,
+            "path": self.path,
+            "size_bytes": self.size_bytes,
+        }
+        if self.duration_ms is not None:
+            d["duration_ms"] = self.duration_ms
+        return json.dumps(d)
 
 
 class Auditor:
@@ -92,6 +94,7 @@ class Auditor:
         action: str,
         path: str,
         size_bytes: int = 0,
+        duration_ms: int | None = None,
     ) -> None:
         rec = AuditRecord(
             ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -101,6 +104,7 @@ class Auditor:
             action=action,
             path=path,
             size_bytes=size_bytes,
+            duration_ms=duration_ms,
         )
         self._fh.write(rec.to_json() + "\n")
         self._fh.flush()
@@ -116,6 +120,43 @@ def size_human(kb: int) -> str:
     if kb < 1024 * 1024:
         return f"{kb / 1024:.1f}M"
     return f"{kb / (1024 * 1024):.2f}G"
+
+
+class Reporter:
+    """Routes events to stdout (human or JSON) and optionally to audit.
+
+    Human mode (default): single-line readable messages on stdout.
+    JSON mode: one JSON object per event on stdout, machine-parseable.
+    Audit log file is independent and always receives a corresponding line.
+    """
+
+    def __init__(self, json_mode: bool = False, verbose: bool = False) -> None:
+        self.json_mode = json_mode
+        self.verbose = verbose
+
+    def _emit(self, level: str, event: str, **fields: object) -> None:
+        if self.json_mode:
+            payload = {"level": level, "event": event, **fields}
+            print(json.dumps(payload))
+        else:
+            parts = [event]
+            for k, v in fields.items():
+                parts.append(f"{k}={v}")
+            print(f"[{level}] " + " ".join(parts))
+
+    def info(self, event: str, **fields: object) -> None:
+        self._emit("info", event, **fields)
+
+    def warn(self, event: str, **fields: object) -> None:
+        self._emit("warn", event, **fields)
+
+    def error(self, event: str, **fields: object) -> None:
+        self._emit("error", event, **fields)
+
+    def debug(self, event: str, **fields: object) -> None:
+        if not self.verbose:
+            return
+        self._emit("debug", event, **fields)
 
 
 def _is_protected(real: str) -> bool:

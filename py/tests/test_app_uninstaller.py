@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from maccleaner import app_uninstaller as au
+from maccleaner.core import Reporter
 
 
 @pytest.fixture(autouse=True)
@@ -180,7 +181,7 @@ def test_run_dispatches_app_remove(fake_home, monkeypatch):
 
     aud = Auditor("dispatch", mode="dry-run")
     d = Deleter(aud, commit=False)
-    rc = au.run(args, d, None)
+    rc = au.run(args, d, None, Reporter())
     assert rc == 42
     aud.close()
 
@@ -192,7 +193,7 @@ def test_run_dispatches_app_startup(fake_home, monkeypatch):
 
     aud = Auditor("dispatch2", mode="dry-run")
     d = Deleter(aud, commit=False)
-    rc = au.run(args, d, None)
+    rc = au.run(args, d, None, Reporter())
     assert rc == 5
     aud.close()
 
@@ -203,7 +204,7 @@ def test_run_unknown_app_cmd_returns_2(fake_home):
     args = type("A", (), {"app_cmd": "nonexistent"})()
     aud = Auditor("dispatch3", mode="dry-run")
     d = Deleter(aud, commit=False)
-    rc = au.run(args, d, None)
+    rc = au.run(args, d, None, Reporter())
     assert rc == 2
     aud.close()
 
@@ -214,7 +215,9 @@ def test_app_reset_dry_run(fake_home):
 
     aud = Auditor("app-reset", mode="dry-run")
     d = Deleter(aud, commit=False)
-    rc = au.run(type("A", (), {"app_cmd": "reset", "app": "myapp"})(), d, None)
+    rc = au.run(
+        type("A", (), {"app_cmd": "reset", "app": "myapp"})(), d, None, Reporter()
+    )
     assert rc == 0
     assert (fake_home / "home" / "Applications" / "MyApp.app").exists()
     aud.close()

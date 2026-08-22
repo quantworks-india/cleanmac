@@ -7,6 +7,7 @@ import os
 import pytest
 
 from maccleaner import disk_analyzer as da
+from maccleaner.core import Reporter
 
 
 @pytest.fixture
@@ -110,5 +111,5 @@ def test_run_system_data_handles_missing_dirs(capsys, monkeypatch, tmp_path):
 
 def test_run_unknown_disk_cmd_returns_2():
     args = type("A", (), {"disk_cmd": "nonexistent"})()
-    rc = da.run(args)
+    rc = da.run(args, Reporter())
     assert rc == 2

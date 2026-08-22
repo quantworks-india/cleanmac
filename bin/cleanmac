@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cleanmac — dispatcher: bash junk-cleanup OR Python subcommands.
 # Legacy:  cleanmac [--dry-run] [--verbose] [--app NAME]
-# Python:  cleanmac {app,dup,disk,mem,hidden} ...
+# Python:  cleanmac [--json] [--verbose] {app,dup,disk,mem,hidden} ...
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,4 +24,14 @@ if [[ ! -d "${PY}/src/maccleaner" ]]; then
   exit 1
 fi
 
-PYTHONPATH="${PY}/src" exec python3 -m maccleaner.cli "$@"
+# When bash was invoked with --verbose, forward it to Python so the
+# Python subcommands see the same verbosity gate.
+PY_ARGS=()
+for arg in "$@"; do
+  if [[ "$arg" == "--verbose" || "$arg" == "-v" ]]; then
+    PY_ARGS+=("--verbose")
+  fi
+done
+PY_ARGS+=("$@")
+
+PYTHONPATH="${PY}/src" exec python3 -m maccleaner.cli "${PY_ARGS[@]}"

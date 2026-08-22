@@ -10,7 +10,7 @@ import argparse
 import time
 
 from maccleaner import __version__
-from maccleaner.core import LOG_DIR, Auditor, Deleter, Sudo
+from maccleaner.core import LOG_DIR, Auditor, Deleter, Reporter, Sudo
 
 RUN_ID = time.strftime("%Y%m%d-%H%M%S")
 
@@ -31,6 +31,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--commit",
         action="store_true",
         help="Actually delete. Without this, nothing is removed.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit structured JSON events to stdout (one per line).",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print debug-level details (file-by-file progress, counters).",
     )
     sub = parser.add_subparsers(dest="tool", required=True)
 
@@ -94,51 +104,52 @@ def main(argv: list[str] | None = None) -> int:
     auditor = Auditor(RUN_ID, mode=mode)
     deleter = Deleter(auditor, commit=args.commit)
     sudo = Sudo()
+    reporter = Reporter(json_mode=args.json, verbose=args.verbose)
 
     try:
         if args.tool == "app":
-            return _run_app(args, deleter, sudo)
+            return _run_app(args, deleter, sudo, reporter)
         if args.tool == "dup":
-            return _run_dup(args, deleter)
+            return _run_dup(args, deleter, reporter)
         if args.tool == "disk":
-            return _run_disk(args)
+            return _run_disk(args, reporter)
         if args.tool == "mem":
-            return _run_mem(args, sudo)
+            return _run_mem(args, sudo, reporter)
         if args.tool == "hidden":
-            return _run_hidden(args)
+            return _run_hidden(args, reporter)
         return 2
     finally:
         auditor.close()
 
 
-def _run_app(args, deleter: Deleter, sudo: Sudo) -> int:
+def _run_app(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
     from maccleaner import app_uninstaller
 
-    return app_uninstaller.run(args, deleter, sudo)
+    return app_uninstaller.run(args, deleter, sudo, reporter)
 
 
-def _run_dup(args, deleter: Deleter) -> int:
+def _run_dup(args, deleter: Deleter, reporter: Reporter) -> int:
     from maccleaner import duplicates
 
-    return duplicates.run(args, deleter)
+    return duplicates.run(args, deleter, reporter)
 
 
-def _run_disk(args) -> int:
+def _run_disk(args, reporter: Reporter) -> int:
     from maccleaner import disk_analyzer
 
-    return disk_analyzer.run(args)
+    return disk_analyzer.run(args, reporter)
 
 
-def _run_mem(args, sudo: Sudo) -> int:
+def _run_mem(args, sudo: Sudo, reporter: Reporter) -> int:
     from maccleaner import memory
 
-    return memory.run(args, sudo)
+    return memory.run(args, sudo, reporter)
 
 
-def _run_hidden(args) -> int:
+def _run_hidden(args, reporter: Reporter) -> int:
     from maccleaner import hidden_files
 
-    return hidden_files.run(args)
+    return hidden_files.run(args, reporter)
 
 
 if __name__ == "__main__":

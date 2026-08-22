@@ -13,7 +13,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from maccleaner.core import Deleter, Sudo, dir_size_kb, is_safe_path
+from maccleaner.core import Deleter, Reporter, Sudo, dir_size_kb, is_safe_path
 
 APP_DIRS = ["/Applications", str(Path.home() / "Applications")]
 
@@ -306,7 +306,7 @@ def _run_update() -> int:
     return 0
 
 
-def run(args, deleter: Deleter, sudo: Sudo) -> int:
+def run(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
     if args.app_cmd == "list":
         apps = list_apps()
         print(f"{'Name':<32} {'Bundle ID':<42} {'Size':>10}")

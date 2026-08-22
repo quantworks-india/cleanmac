@@ -7,6 +7,7 @@ from subprocess import CompletedProcess
 import pytest
 
 from maccleaner import memory
+from maccleaner.core import Reporter
 
 VM_STAT_OUTPUT = """\
 Mach Virtual Memory Statistics: (page size of 16384 bytes)
@@ -79,7 +80,7 @@ def test_heavy_lists_processes(monkeypatch, capsys):
     monkeypatch.setattr(memory, "confirm", lambda *a, **kw: False)
 
     args = type("A", (), {"mem_cmd": "heavy"})()
-    rc = memory.run(args, FakeSudo())
+    rc = memory.run(args, FakeSudo(), Reporter())
     out = capsys.readouterr().out
 
     assert rc == 0
@@ -101,7 +102,7 @@ def test_free_calls_sudo_and_shows_before_after(monkeypatch, capsys):
 
     sudo = FakeSudo()
     args = type("A", (), {"mem_cmd": "free"})()
-    rc = memory.run(args, sudo)
+    rc = memory.run(args, sudo, Reporter())
     out = capsys.readouterr().out
 
     assert rc == 0
@@ -116,7 +117,7 @@ def test_free_fails_without_sudo():
     sudo = FakeSudo()
     sudo.ensure = lambda: False
     args = type("A", (), {"mem_cmd": "free"})()
-    rc = memory.run(args, sudo)
+    rc = memory.run(args, sudo, Reporter())
     assert rc == 1
     assert sudo.runs == []
 
@@ -138,7 +139,7 @@ def test_heavy_refuses_kill_of_critical_pid(pid_str, monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", lambda *a, **kw: pid_str)
 
     args = type("A", (), {"mem_cmd": "heavy"})()
-    rc = memory.run(args, FakeSudo())
+    rc = memory.run(args, FakeSudo(), Reporter())
     out = capsys.readouterr().out
 
     assert rc == 0
@@ -163,7 +164,7 @@ def test_heavy_kills_normal_pid(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", lambda *a, **kw: "12345")
 
     args = type("A", (), {"mem_cmd": "heavy"})()
-    rc = memory.run(args, FakeSudo())
+    rc = memory.run(args, FakeSudo(), Reporter())
     out = capsys.readouterr().out
 
     assert rc == 0
@@ -186,7 +187,7 @@ def test_heavy_invalid_pid_returns_zero(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", lambda *a, **kw: "not-a-pid")
 
     args = type("A", (), {"mem_cmd": "heavy"})()
-    rc = memory.run(args, FakeSudo())
+    rc = memory.run(args, FakeSudo(), Reporter())
     out = capsys.readouterr().out
 
     assert rc == 0
@@ -209,7 +210,7 @@ def test_heavy_no_tty_skips_kill_prompt(monkeypatch):
     monkeypatch.setattr(memory.sys.stdin, "isatty", lambda: False)
 
     args = type("A", (), {"mem_cmd": "heavy"})()
-    rc = memory.run(args, FakeSudo())
+    rc = memory.run(args, FakeSudo(), Reporter())
     assert rc == 0
     assert not any(c[0] == "kill" for c in calls)
 
@@ -220,7 +221,7 @@ def test_ps_failure_returns_1(monkeypatch, capsys):
 
     monkeypatch.setattr(memory.subprocess, "run", fake_run)
     args = type("A", (), {"mem_cmd": "heavy"})()
-    rc = memory.run(args, FakeSudo())
+    rc = memory.run(args, FakeSudo(), Reporter())
     out = capsys.readouterr().out
     assert rc == 1
     assert "ps failed" in out
@@ -242,7 +243,7 @@ def test_purge_failure_returns_1(monkeypatch, capsys):
             return CompletedProcess(args, 1, "", "purge denied")
 
     args = type("A", (), {"mem_cmd": "free"})()
-    rc = memory.run(args, FailingSudo())
+    rc = memory.run(args, FailingSudo(), Reporter())
     out = capsys.readouterr().out
     assert rc == 1
     assert "purge denied" in out

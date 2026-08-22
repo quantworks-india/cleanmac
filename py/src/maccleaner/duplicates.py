@@ -17,7 +17,7 @@ import tempfile
 from pathlib import Path
 
 from maccleaner import core
-from maccleaner.core import Deleter
+from maccleaner.core import Deleter, Reporter
 
 HASH_BUFFER = 1024 * 1024
 DHASH_THRESHOLD = 10
@@ -374,7 +374,7 @@ def _run_merge_folders(args, deleter: Deleter) -> int:
     return 0
 
 
-def run(args, deleter: Deleter) -> int:
+def run(args, deleter: Deleter, reporter: Reporter) -> int:
     if args.dup_cmd == "scan":
         return _run_scan(args, deleter)
     if args.dup_cmd == "similar-photos":

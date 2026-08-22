@@ -14,6 +14,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+from maccleaner.core import Reporter
+
 NETWORK_MOUNT_TYPES = {"nfs", "smbfs", "afpfs", "webdav", "autofs", "cifs"}
 
 
@@ -320,7 +322,7 @@ render(root);
     return 0
 
 
-def run(args) -> int:
+def run(args, reporter: Reporter) -> int:
     if args.disk_cmd == "scan":
         return _run_scan(args)
     if args.disk_cmd == "top":

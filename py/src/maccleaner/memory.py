@@ -7,7 +7,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
-from maccleaner.core import Sudo, confirm, size_human
+from maccleaner.core import Reporter, Sudo, confirm, size_human
 
 # PIDs that must never be killed — init (0), launchd (1), kernel (2).
 PROTECTED_PIDS = frozenset({0, 1, 2})
@@ -116,7 +116,7 @@ def _run_heavy() -> int:
     return 0
 
 
-def run(args, sudo: Sudo) -> int:
+def run(args, sudo: Sudo, reporter: Reporter) -> int:
     if args.mem_cmd == "free":
         return _run_free(sudo)
     if args.mem_cmd == "heavy":
