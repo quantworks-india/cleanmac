@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
 
 import pytest
 
@@ -32,7 +30,7 @@ def test_scan_total_size(tree):
 
 def test_walk_skips_symlink_loop(tree):
     (tree / "loop").symlink_to(tree, target_is_directory=True)
-    sizes, total = da.scan(str(tree))
+    _sizes, total = da.scan(str(tree))
     assert total == 350  # symlink loop not followed
 
 
@@ -51,7 +49,7 @@ def test_report_creates_self_contained_html(tree, tmp_path):
     assert out.exists()
     content = out.read_text()
     assert "<!DOCTYPE html>" in content
-    assert "<div id=\"map\">" in content
+    assert '<div id="map">' in content
     assert "Disk Treemap" in content
     # treemap JSON includes all nodes (files + dir) as tiles
     assert "file1.txt" in content
@@ -60,3 +58,57 @@ def test_report_creates_self_contained_html(tree, tmp_path):
 def test_scan_tolerates_missing_dir(tmp_path):
     with pytest.raises(SystemExit):
         da.scan(str(tmp_path / "nope"))
+
+
+def test_treemap_handles_deep_paths(tmp_path):
+    """Iterative treemap builder must not hit RecursionError on deep trees."""
+    root = str(tmp_path / "deep")
+    sizes: dict[str, int] = {root: 0}
+    path = root
+    for i in range(3000):
+        child = os.path.join(path, f"level{i}")
+        sizes[child] = 10
+        path = child
+
+    treemap = da._build_treemap_json(sizes, root)
+
+    assert treemap["name"] == "deep"
+    assert len(treemap["children"]) == 1
+
+
+def test_run_scan_prints_total_and_top(tree, capsys):
+    args = type("A", (), {"dir": str(tree)})()
+    rc = da._run_scan(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Scan of" in out
+    assert "350" in out or "B" in out
+
+
+def test_run_top_uses_dir_when_provided(tree, capsys):
+    args = type("A", (), {"dir": str(tree)})()
+    rc = da._run_top(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Top 25" in out
+
+
+def test_run_summary_breaks_down_top_level(tree, capsys):
+    args = type("A", (), {"dir": str(tree)})()
+    rc = da._run_summary(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Top-level breakdown" in out
+
+
+def test_run_system_data_handles_missing_dirs(capsys, monkeypatch, tmp_path):
+    monkeypatch.setenv("CLEANMAC_HOME", str(tmp_path))
+    args = type("A", (), {})()
+    rc = da._run_system_data(args)
+    assert rc == 0
+
+
+def test_run_unknown_disk_cmd_returns_2():
+    args = type("A", (), {"disk_cmd": "nonexistent"})()
+    rc = da.run(args)
+    assert rc == 2

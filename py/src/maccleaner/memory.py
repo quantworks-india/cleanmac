@@ -9,6 +9,9 @@ from dataclasses import dataclass
 
 from maccleaner.core import Sudo, confirm, size_human
 
+# PIDs that must never be killed — init (0), launchd (1), kernel (2).
+PROTECTED_PIDS = frozenset({0, 1, 2})
+
 
 @dataclass
 class Proc:
@@ -100,7 +103,12 @@ def _run_heavy() -> int:
         except ValueError:
             print(f"Invalid PID: {pid_str}")
             return 0
-        kr = subprocess.run(["kill", str(pid)], capture_output=True, text=True, check=False)
+        if pid in PROTECTED_PIDS:
+            print(f"  ✗ refused (protected PID {pid})")
+            return 0
+        kr = subprocess.run(
+            ["kill", str(pid)], capture_output=True, text=True, check=False
+        )
         if kr.returncode == 0:
             print(f"  ✓ sent TERM to {pid}")
         else:

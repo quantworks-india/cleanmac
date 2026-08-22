@@ -7,7 +7,6 @@ Bundle-ID-first leftover discovery (audit MAJOR-1), full path coverage
 from __future__ import annotations
 
 import glob
-import json
 import os
 import plistlib
 import subprocess
@@ -97,7 +96,11 @@ def _find_app(name_or_bundle: str, force: bool = False) -> AppInfo:
     apps = list_apps()
     exact = [a for a in apps if a.name.lower() == name_or_bundle.lower()]
     if not exact:
-        exact = [a for a in apps if a.bundle_id and a.bundle_id.lower() == name_or_bundle.lower()]
+        exact = [
+            a
+            for a in apps
+            if a.bundle_id and a.bundle_id.lower() == name_or_bundle.lower()
+        ]
     if not exact:
         raise SystemExit(f"App not found: {name_or_bundle}. Try 'cleanmac app list'")
     app = exact[0]
@@ -120,7 +123,9 @@ def _user_paths(app: AppInfo) -> list[str]:
             continue
         p = home / "Library" / rel
         # expand globs
-        matches = glob.glob(str(p)) if "*" in str(p) else ([str(p)] if p.exists() else [])
+        matches = (
+            glob.glob(str(p)) if "*" in str(p) else ([str(p)] if p.exists() else [])
+        )
         for m in matches:
             if is_safe_path(m):
                 found.append(m)
@@ -138,7 +143,9 @@ def _system_paths(app: AppInfo) -> list[str]:
             p = Path(rel)
         else:
             p = Path("/Library") / rel
-        matches = glob.glob(str(p)) if "*" in str(p) else ([str(p)] if p.exists() else [])
+        matches = (
+            glob.glob(str(p)) if "*" in str(p) else ([str(p)] if p.exists() else [])
+        )
         for m in matches:
             if is_safe_path(m):
                 found.append(m)
@@ -164,23 +171,22 @@ def _run_remove(args, deleter: Deleter, sudo: Sudo) -> int:
     print("\nDeleting app bundle + leftovers:")
     deleter.delete("app_remove", [app.path])
     deleter.delete("app_remove", user)
-
-    for p in sys_paths:
-        if not is_safe_path(p):
-            continue
-        size = dir_size_kb(p) * 1024
-        if not deleter.commit:
-            deleter.auditor.write("app_remove", "would_delete", p, size)
-            print(f"  · would delete (sudo): {p}")
-            continue
-        r = sudo.run(["rm", "-rf", p])
-        if r.returncode == 0:
-            deleter.auditor.write("app_remove", "deleted", p, size)
-            print(f"  ✓ deleted (sudo): {p}")
-        else:
-            deleter.auditor.write("app_remove", "failed", p, size)
-            print(f"  ✗ failed (sudo): {p} ({r.stderr.strip()})")
+    deleter.delete("app_remove", sys_paths, sudo=sudo)
     return 0
+
+
+def _scope_for_path(path: str) -> str:
+    """Classify a LaunchAgent/LaunchDaemon directory as 'system' or 'user'.
+
+    - LaunchDaemons are always system-scoped.
+    - LaunchAgents under /Library (not under a user's home) are system-scoped.
+    - LaunchAgents under ~/Library are user-scoped.
+    """
+    if os.path.isabs(path) and "LaunchDaemons" in path:
+        return "system"
+    if "LaunchAgents" in path and path.startswith("/Library"):
+        return "system"
+    return "user"
 
 
 def _run_startup(args, sudo: Sudo) -> int:
@@ -209,8 +215,8 @@ def _startup_list() -> int:
                 label = data.get("Label", label)
             except (OSError, plistlib.InvalidFileException):
                 pass
-            scope = "user" if "LaunchAgents" in str(d) and "Library" not in str(d.parent.parent) else ("system" if "Daemons" in str(d) else "user")
-            state = "?" 
+            scope = _scope_for_path(str(d))
+            state = "?"
             if scope == "user":
                 r = subprocess.run(
                     ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
@@ -305,7 +311,9 @@ def run(args, deleter: Deleter, sudo: Sudo) -> int:
         apps = list_apps()
         print(f"{'Name':<32} {'Bundle ID':<42} {'Size':>10}")
         for a in apps:
-            print(f"{a.name[:30]:<32} {(a.bundle_id or '')[:40]:<42} {dir_size_kb(a.path):>9}K")
+            print(
+                f"{a.name[:30]:<32} {(a.bundle_id or '')[:40]:<42} {dir_size_kb(a.path):>9}K"
+            )
         print(f"\n{len(apps)} apps")
         return 0
     if args.app_cmd == "remove":

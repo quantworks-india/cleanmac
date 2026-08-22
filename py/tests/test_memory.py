@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from subprocess import CompletedProcess
 
-from maccleaner import memory
+import pytest
 
+from maccleaner import memory
 
 VM_STAT_OUTPUT = """\
 Mach Virtual Memory Statistics: (page size of 16384 bytes)
@@ -118,3 +119,136 @@ def test_free_fails_without_sudo():
     rc = memory.run(args, sudo)
     assert rc == 1
     assert sudo.runs == []
+
+
+@pytest.mark.parametrize("pid_str", ["0", "1", "2"])
+def test_heavy_refuses_kill_of_critical_pid(pid_str, monkeypatch, capsys):
+    """Critical PIDs (0=init, 1=launchd, 2=kernel) must never be killed."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kw):
+        calls.append(list(cmd))
+        if cmd[0] == "ps":
+            return CompletedProcess(cmd, 0, PS_OUTPUT, "")
+        return CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(memory.subprocess, "run", fake_run)
+    monkeypatch.setattr(memory, "confirm", lambda *a, **kw: True)
+    monkeypatch.setattr(memory.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a, **kw: pid_str)
+
+    args = type("A", (), {"mem_cmd": "heavy"})()
+    rc = memory.run(args, FakeSudo())
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    kill_calls = [c for c in calls if c[0] == "kill"]
+    assert kill_calls == [], f"kill was called for protected PID {pid_str}"
+    assert "refused" in out.lower() or "protected" in out.lower()
+
+
+def test_heavy_kills_normal_pid(monkeypatch, capsys):
+    """A non-critical PID should be passed to kill()."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kw):
+        calls.append(list(cmd))
+        if cmd[0] == "ps":
+            return CompletedProcess(cmd, 0, PS_OUTPUT, "")
+        return CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(memory.subprocess, "run", fake_run)
+    monkeypatch.setattr(memory, "confirm", lambda *a, **kw: True)
+    monkeypatch.setattr(memory.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a, **kw: "12345")
+
+    args = type("A", (), {"mem_cmd": "heavy"})()
+    rc = memory.run(args, FakeSudo())
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert ["kill", "12345"] in calls
+    assert "sent TERM" in out
+
+
+def test_heavy_invalid_pid_returns_zero(monkeypatch, capsys):
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kw):
+        calls.append(list(cmd))
+        if cmd[0] == "ps":
+            return CompletedProcess(cmd, 0, PS_OUTPUT, "")
+        return CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(memory.subprocess, "run", fake_run)
+    monkeypatch.setattr(memory, "confirm", lambda *a, **kw: True)
+    monkeypatch.setattr(memory.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a, **kw: "not-a-pid")
+
+    args = type("A", (), {"mem_cmd": "heavy"})()
+    rc = memory.run(args, FakeSudo())
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert not any(c[0] == "kill" for c in calls)
+    assert "Invalid PID" in out
+
+
+def test_heavy_no_tty_skips_kill_prompt(monkeypatch):
+    """When stdin is not a TTY, the kill prompt must not appear."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kw):
+        calls.append(list(cmd))
+        if cmd[0] == "ps":
+            return CompletedProcess(cmd, 0, PS_OUTPUT, "")
+        return CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(memory.subprocess, "run", fake_run)
+    monkeypatch.setattr(memory, "confirm", lambda *a, **kw: True)
+    monkeypatch.setattr(memory.sys.stdin, "isatty", lambda: False)
+
+    args = type("A", (), {"mem_cmd": "heavy"})()
+    rc = memory.run(args, FakeSudo())
+    assert rc == 0
+    assert not any(c[0] == "kill" for c in calls)
+
+
+def test_ps_failure_returns_1(monkeypatch, capsys):
+    def fake_run(cmd, *args, **kw):
+        return CompletedProcess(cmd, 1, "", "ps failed")
+
+    monkeypatch.setattr(memory.subprocess, "run", fake_run)
+    args = type("A", (), {"mem_cmd": "heavy"})()
+    rc = memory.run(args, FakeSudo())
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "ps failed" in out
+
+
+def test_purge_failure_returns_1(monkeypatch, capsys):
+    def fake_run(cmd, *args, **kw):
+        if cmd[0] == "vm_stat":
+            return CompletedProcess(cmd, 0, VM_STAT_OUTPUT, "")
+        return CompletedProcess(cmd, 1, "", "purge denied")
+
+    monkeypatch.setattr(memory.subprocess, "run", fake_run)
+
+    class FailingSudo:
+        def ensure(self) -> bool:
+            return True
+
+        def run(self, args: list[str]) -> CompletedProcess:
+            return CompletedProcess(args, 1, "", "purge denied")
+
+    args = type("A", (), {"mem_cmd": "free"})()
+    rc = memory.run(args, FailingSudo())
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "purge denied" in out
+
+
+def test_parse_vm_stat_handles_no_page_size_line():
+    out = "Pages free: 100.\nPages speculative: 10.\n"
+    free = memory._parse_vm_stat(out)
+    assert free == (100 + 10) * 16384

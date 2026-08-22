@@ -16,11 +16,13 @@ import os
 import shutil
 import subprocess
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
-STATE_DIR = Path(os.environ.get("CLEANMAC_STATE_DIR", Path.home() / ".local/state/cleanmac"))
+STATE_DIR = Path(
+    os.environ.get("CLEANMAC_STATE_DIR", Path.home() / ".local/state/cleanmac")
+)
 LOG_DIR = STATE_DIR / "logs"
 AUDIT_DIR = STATE_DIR / "audit"
 
@@ -207,7 +209,9 @@ class Deleter:
         self.commit = commit
         self.confirm_fn = confirm_fn or confirm
 
-    def delete(self, step: str, paths: Iterable[str]) -> list[str]:
+    def delete(
+        self, step: str, paths: Iterable[str], sudo: Sudo | None = None
+    ) -> list[str]:
         """Delete paths, auditing each. Returns list of deleted paths.
 
         Rules:
@@ -215,6 +219,7 @@ class Deleter:
         - in dry-run mode nothing is deleted, only audited as 'would_delete'
         - in commit mode each path (or group) requires confirmation unless
           confirm_fn returns True for all
+        - when sudo is provided, elevated deletion uses sudo -n rm -rf
         """
         deleted: list[str] = []
         for p in paths:
@@ -232,7 +237,14 @@ class Deleter:
                 print(f"  · skipped: {p}")
                 continue
             try:
-                _leaf_delete(p)
+                if sudo is not None:
+                    r = sudo.run(["rm", "-rf", p])
+                    if r.returncode != 0:
+                        self.auditor.write(step, "failed", p, size)
+                        print(f"  ✗ failed: {p} ({r.stderr.strip()})")
+                        continue
+                else:
+                    _leaf_delete(p)
             except OSError as e:
                 self.auditor.write(step, "failed", p, size)
                 print(f"  ✗ failed: {p} ({e})")

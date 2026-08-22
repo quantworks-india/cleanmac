@@ -7,12 +7,10 @@ Subcommands: app, dup, disk, mem, hidden.
 from __future__ import annotations
 
 import argparse
-import sys
 import time
-from pathlib import Path
 
 from maccleaner import __version__
-from maccleaner.core import AUDIT_DIR, LOG_DIR, Auditor, Deleter, Sudo
+from maccleaner.core import LOG_DIR, Auditor, Deleter, Sudo
 
 RUN_ID = time.strftime("%Y%m%d-%H%M%S")
 

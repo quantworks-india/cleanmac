@@ -21,10 +21,21 @@ from maccleaner.core import Deleter
 
 HASH_BUFFER = 1024 * 1024
 DHASH_THRESHOLD = 10
-PHOTO_EXTS = frozenset({
-    ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp",
-    ".gif", ".heic", ".heif", ".webp", ".raw",
-})
+PHOTO_EXTS = frozenset(
+    {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".tif",
+        ".tiff",
+        ".bmp",
+        ".gif",
+        ".heic",
+        ".heif",
+        ".webp",
+        ".raw",
+    }
+)
 
 
 def _parse_size(s: str) -> int:
@@ -138,6 +149,7 @@ def _run_scan(args, deleter: Deleter) -> int:
 
     by_size: dict[int, list[tuple[str, os.stat_result]]] = {}
     seen_inodes: set[tuple[int, int]] = set()
+    stats: dict[str, os.stat_result] = {}
     for path, st in _iter_files(root):
         if st.st_size < min_size:
             continue
@@ -146,6 +158,7 @@ def _run_scan(args, deleter: Deleter) -> int:
             if inode_key in seen_inodes:
                 continue
             seen_inodes.add(inode_key)
+        stats[path] = st
         by_size.setdefault(st.st_size, []).append((path, st))
 
     db = _open_index()
@@ -167,10 +180,10 @@ def _run_scan(args, deleter: Deleter) -> int:
     total_dupes = 0
     total_reclaimable = 0
     for group in groups:
-        paths_with_mtime = sorted(group, key=lambda p: os.stat(p).st_mtime)
+        paths_with_mtime = sorted(group, key=lambda p: stats[p].st_mtime)
         keep = paths_with_mtime[0]
         to_delete = paths_with_mtime[1:]
-        reclaimable = sum(os.stat(p).st_size for p in to_delete)
+        reclaimable = sum(stats[p].st_size for p in to_delete)
         total_dupes += len(to_delete)
         total_reclaimable += reclaimable
         print(
@@ -270,6 +283,13 @@ def _hamming(a: int, b: int) -> int:
 def _group_similar(
     hashes: list[tuple[str, int]], threshold: int = DHASH_THRESHOLD
 ) -> list[list[str]]:
+    """Group similar images by dHash hamming distance.
+
+    Uses union-find to merge pairs whose hamming distance is within
+    *threshold*.  Complexity is O(n²) pairwise — acceptable for typical
+    photo collections but may be slow on directories with thousands of
+    images.
+    """
     n = len(hashes)
     parent = list(range(n))
 
