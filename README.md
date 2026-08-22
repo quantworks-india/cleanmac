@@ -79,6 +79,35 @@ Global flags (must appear before subcommand):
 |---|---|---|
 | `--dry-run` | **on** | Preview only, delete nothing |
 | `--commit` | off | Actually delete. Without this, nothing is removed |
+| `--json` | off | Emit one structured JSON event per line on stdout (pipe to `jq`) |
+| `--verbose` | off | Print debug-level progress (file-by-file, scan counters) |
+
+### JSON output
+
+`--json` rewrites stdout as newline-delimited JSON events:
+
+```bash
+cleanmac --json hidden show | jq .
+# {"level": "info", "event": "hidden_files_toggled", "state": "shown"}
+```
+
+Use it from scripts:
+
+```bash
+duplicates=$(cleanmac --json dup scan ~/Downloads | jq -c 'select(.event=="dup_scan_complete") | .reclaimable_bytes')
+```
+
+The existing JSONL audit log in `~/.local/state/cleanmac/audit/` is unchanged — `--json` only affects stdout.
+
+### Verbose output
+
+`--verbose` adds debug-level events (hash progress, scan counters). Useful for long-running scans:
+
+```bash
+cleanmac --verbose dup scan ~/Downloads
+```
+
+Bash `--verbose` is forwarded to Python so a single flag enables verbose output across both engines.
 
 ---
 
@@ -101,6 +130,29 @@ Global flags (must appear before subcommand):
 ├── audit/          # JSONL audit trail (bash + Python unified)
 ├── report-<ts>.json  # bash run report
 └── dup-index.db    # Python duplicate-finder SQLite cache
+```
+
+Audit JSONL schema (one event per line):
+
+| Field | Type | Notes |
+|---|---|---|
+| `ts` | ISO 8601 UTC | Timestamp of the event |
+| `run` | string | Run ID (correlates with bash run) |
+| `mode` | `dry-run` or `live` | |
+| `step` | string | e.g. `dup_scan`, `app_remove` |
+| `action` | string | e.g. `deleted`, `would_delete`, `refused` |
+| `path` | string | Absolute path |
+| `size_bytes` | int | Size in bytes (for delete events) |
+| `duration_ms` | int | Only present when the operation recorded timing |
+
+Query the audit log with `jq`:
+
+```bash
+# all dup_scan deletions from today
+jq 'select(.step=="dup_scan" and .action=="deleted")' ~/.local/state/cleanmac/audit/*.jsonl
+
+# timing of completed scans
+jq 'select(.duration_ms) | {step, duration_ms}' ~/.local/state/cleanmac/audit/*.jsonl
 ```
 
 Environment variables: `CLEANMAC_STATE_DIR`, `CLEANMAC_HOME`, `CLEANMAC_SYS_CACHES`, `CLEANMAC_SYS_LOGS`.
