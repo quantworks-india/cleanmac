@@ -93,3 +93,10 @@ def test_remove_dry_run_does_not_delete(fake_home):
     # fake app still there
     assert (fake_home / "home" / "Applications" / "MyApp.app").exists()
     aud.close()
+
+
+def test_scope_for_path():
+    """LaunchDaemons and /Library/LaunchAgents are system; user LaunchAgents are user."""
+    assert au._scope_for_path("/Library/LaunchDaemons") == "system"
+    assert au._scope_for_path("/Library/LaunchAgents") == "system"
+    assert au._scope_for_path("/Users/someuser/Library/LaunchAgents") == "user"

@@ -190,6 +190,20 @@ def _run_remove(args, deleter: Deleter, sudo: Sudo) -> int:
     return 0
 
 
+def _scope_for_path(path: str) -> str:
+    """Classify a LaunchAgent/LaunchDaemon directory as 'system' or 'user'.
+
+    - LaunchDaemons are always system-scoped.
+    - LaunchAgents under /Library (not under a user's home) are system-scoped.
+    - LaunchAgents under ~/Library are user-scoped.
+    """
+    if os.path.isabs(path) and "LaunchDaemons" in path:
+        return "system"
+    if "LaunchAgents" in path and path.startswith("/Library"):
+        return "system"
+    return "user"
+
+
 def _run_startup(args, sudo: Sudo) -> int:
     if args.action == "list":
         return _startup_list()
@@ -216,11 +230,7 @@ def _startup_list() -> int:
                 label = data.get("Label", label)
             except (OSError, plistlib.InvalidFileException):
                 pass
-            scope = (
-                "user"
-                if "LaunchAgents" in str(d) and "Library" not in str(d.parent.parent)
-                else ("system" if "Daemons" in str(d) else "user")
-            )
+            scope = _scope_for_path(str(d))
             state = "?"
             if scope == "user":
                 r = subprocess.run(
