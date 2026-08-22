@@ -110,3 +110,87 @@ def test_deleter_refuses_unsafe_path_even_in_commit(isolated_home):
     assert deleted == []
     assert os.path.exists("/etc/passwd")
     aud.close()
+
+
+# ── Reporter (observability) ────────────────────────────────────────
+
+
+def test_reporter_json_emits_structured_event(isolated_home, capsys):
+    """--json mode emits one JSON object per event to stdout."""
+    from maccleaner.core import Reporter
+
+    r = Reporter(json_mode=True, verbose=False)
+    r.info("scan_complete", files=42, freed_bytes=1024)
+    out = capsys.readouterr().out.strip()
+    rec = json.loads(out)
+    assert rec["level"] == "info"
+    assert rec["event"] == "scan_complete"
+    assert rec["files"] == 42
+    assert rec["freed_bytes"] == 1024
+
+
+def test_reporter_text_emits_human_message(isolated_home, capsys):
+    """Default mode emits a human-readable message to stdout."""
+    from maccleaner.core import Reporter
+
+    r = Reporter(json_mode=False, verbose=False)
+    r.info("scan_complete", files=42)
+    out = capsys.readouterr().out.strip()
+    assert "scan_complete" in out
+    assert "42" in out
+
+
+def test_reporter_debug_suppressed_without_verbose(isolated_home, capsys):
+    """debug() is a no-op when verbose=False."""
+    from maccleaner.core import Reporter
+
+    r = Reporter(json_mode=False, verbose=False)
+    r.debug("hashing", path="/tmp/a")
+    out = capsys.readouterr().out
+    assert out == ""
+
+
+def test_reporter_debug_emits_when_verbose(isolated_home, capsys):
+    """debug() emits in both modes when verbose=True."""
+    from maccleaner.core import Reporter
+
+    r = Reporter(json_mode=False, verbose=True)
+    r.debug("hashing", path="/tmp/a")
+    out = capsys.readouterr().out
+    assert "hashing" in out
+
+
+def test_reporter_warn_and_error_use_correct_levels(isolated_home, capsys):
+    from maccleaner.core import Reporter
+
+    r = Reporter(json_mode=True, verbose=False)
+    r.warn("refused", path="/etc")
+    r.error("failed", code=42)
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 2
+    a, b = json.loads(lines[0]), json.loads(lines[1])
+    assert a["level"] == "warn"
+    assert b["level"] == "error"
+
+
+# ── AuditRecord duration_ms ──────────────────────────────────────────
+
+
+def test_audit_record_includes_duration_ms(isolated_home):
+    """Auditor.write() persists duration_ms when provided."""
+    aud = Auditor("dur-run", mode="dry-run")
+    aud.write("step", "action", "/tmp/foo", 0, duration_ms=123)
+    aud.close()
+    lines = (core.AUDIT_DIR / "audit-dur-run.jsonl").read_text().strip().splitlines()
+    rec = json.loads(lines[0])
+    assert rec["duration_ms"] == 123
+
+
+def test_audit_record_omits_duration_when_none(isolated_home):
+    """Backward-compat: duration_ms absent when not provided (old audit readers)."""
+    aud = Auditor("nodur-run", mode="dry-run")
+    aud.write("step", "action", "/tmp/foo", 0)
+    aud.close()
+    lines = (core.AUDIT_DIR / "audit-nodur-run.jsonl").read_text().strip().splitlines()
+    rec = json.loads(lines[0])
+    assert "duration_ms" not in rec
