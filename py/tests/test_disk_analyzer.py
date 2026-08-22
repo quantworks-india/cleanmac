@@ -74,3 +74,41 @@ def test_treemap_handles_deep_paths(tmp_path):
 
     assert treemap["name"] == "deep"
     assert len(treemap["children"]) == 1
+
+
+def test_run_scan_prints_total_and_top(tree, capsys):
+    args = type("A", (), {"dir": str(tree)})()
+    rc = da._run_scan(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Scan of" in out
+    assert "350" in out or "B" in out
+
+
+def test_run_top_uses_dir_when_provided(tree, capsys):
+    args = type("A", (), {"dir": str(tree)})()
+    rc = da._run_top(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Top 25" in out
+
+
+def test_run_summary_breaks_down_top_level(tree, capsys):
+    args = type("A", (), {"dir": str(tree)})()
+    rc = da._run_summary(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Top-level breakdown" in out
+
+
+def test_run_system_data_handles_missing_dirs(capsys, monkeypatch, tmp_path):
+    monkeypatch.setenv("CLEANMAC_HOME", str(tmp_path))
+    args = type("A", (), {})()
+    rc = da._run_system_data(args)
+    assert rc == 0
+
+
+def test_run_unknown_disk_cmd_returns_2():
+    args = type("A", (), {"disk_cmd": "nonexistent"})()
+    rc = da.run(args)
+    assert rc == 2

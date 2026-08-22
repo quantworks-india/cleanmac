@@ -148,3 +148,91 @@ def test_scope_for_path():
     assert au._scope_for_path("/Library/LaunchDaemons") == "system"
     assert au._scope_for_path("/Library/LaunchAgents") == "system"
     assert au._scope_for_path("/Users/someuser/Library/LaunchAgents") == "user"
+
+
+def test_remove_no_leftovers_exits_early(fake_home):
+    """When both user and system leftover lists are empty, _run_remove prints a message and returns."""
+    from maccleaner.core import Auditor, Deleter
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(au, "_user_paths", lambda app: [])
+        monkeypatch.setattr(au, "_system_paths", lambda app: [])
+
+        aud = Auditor("app-empty", mode="dry-run")
+        d = Deleter(aud, commit=False)
+        rc = au._run_remove(type("A", (), {"app": "myapp", "force": False})(), d, None)
+        assert rc == 0
+        aud.close()
+    finally:
+        monkeypatch.undo()
+
+
+def test_run_dispatches_app_remove(fake_home, monkeypatch):
+    """run() with app_cmd='remove' calls _run_remove."""
+    monkeypatch.setattr(au, "_run_remove", lambda args, d, s: 42)
+    args = type(
+        "A",
+        (),
+        {"app_cmd": "remove", "app": "myapp", "force": False},
+    )()
+    from maccleaner.core import Auditor, Deleter
+
+    aud = Auditor("dispatch", mode="dry-run")
+    d = Deleter(aud, commit=False)
+    rc = au.run(args, d, None)
+    assert rc == 42
+    aud.close()
+
+
+def test_run_dispatches_app_startup(fake_home, monkeypatch):
+    monkeypatch.setattr(au, "_run_startup", lambda args, s: 5)
+    args = type("A", (), {"app_cmd": "startup", "action": "list"})()
+    from maccleaner.core import Auditor, Deleter
+
+    aud = Auditor("dispatch2", mode="dry-run")
+    d = Deleter(aud, commit=False)
+    rc = au.run(args, d, None)
+    assert rc == 5
+    aud.close()
+
+
+def test_run_unknown_app_cmd_returns_2(fake_home):
+    from maccleaner.core import Auditor, Deleter
+
+    args = type("A", (), {"app_cmd": "nonexistent"})()
+    aud = Auditor("dispatch3", mode="dry-run")
+    d = Deleter(aud, commit=False)
+    rc = au.run(args, d, None)
+    assert rc == 2
+    aud.close()
+
+
+def test_app_reset_dry_run(fake_home):
+    """reset subcommand deletes prefs + Application Support in dry-run without removing."""
+    from maccleaner.core import Auditor, Deleter
+
+    aud = Auditor("app-reset", mode="dry-run")
+    d = Deleter(aud, commit=False)
+    rc = au.run(type("A", (), {"app_cmd": "reset", "app": "myapp"})(), d, None)
+    assert rc == 0
+    assert (fake_home / "home" / "Applications" / "MyApp.app").exists()
+    aud.close()
+
+
+def test_list_apps_includes_size(fake_home):
+    apps = au.list_apps()
+    assert len(apps) == 1
+    assert apps[0].size_kb >= 0
+
+
+def test_find_app_by_bundle_id_case_insensitive(fake_home):
+    a = au._find_app("com.example.myapp")
+    assert a.bundle_id == "com.example.myapp"
+    a = au._find_app("COM.EXAMPLE.MYAPP")
+    assert a.bundle_id == "com.example.myapp"
+
+
+def test_find_app_not_found_exits(fake_home):
+    with pytest.raises(SystemExit):
+        au._find_app("nonexistent.app")
