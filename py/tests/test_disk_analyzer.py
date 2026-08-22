@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from maccleaner import disk_analyzer as da
@@ -56,3 +58,19 @@ def test_report_creates_self_contained_html(tree, tmp_path):
 def test_scan_tolerates_missing_dir(tmp_path):
     with pytest.raises(SystemExit):
         da.scan(str(tmp_path / "nope"))
+
+
+def test_treemap_handles_deep_paths(tmp_path):
+    """Iterative treemap builder must not hit RecursionError on deep trees."""
+    root = str(tmp_path / "deep")
+    sizes: dict[str, int] = {root: 0}
+    path = root
+    for i in range(3000):
+        child = os.path.join(path, f"level{i}")
+        sizes[child] = 10
+        path = child
+
+    treemap = da._build_treemap_json(sizes, root)
+
+    assert treemap["name"] == "deep"
+    assert len(treemap["children"]) == 1

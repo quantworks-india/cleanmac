@@ -193,26 +193,43 @@ def _run_system_data(args) -> int:
 
 
 def _build_treemap_json(sizes: dict[str, int], root: str) -> dict:
-    """Build nested treemap structure from flat dir→size map."""
+    """Build nested treemap structure from flat dir→size map.
+
+    Iterative (no recursion) so deeply nested trees don't hit
+    RecursionError.  All nodes are built from the flat sizes dict,
+    then children are linked to parents via dirname.
+    """
     root_real = os.path.realpath(root)
 
-    def node(path: str) -> dict:
-        children: list[dict] = []
-        for child_path, child_size in sizes.items():
-            if (
-                os.path.dirname(child_path) == path
-                and child_size > 0
-                and (sizes.get(child_path, 0) > 0 or os.path.isdir(child_path))
-            ):
-                children.append(node(child_path))
-        return {
+    # Build all nodes upfront.
+    nodes: dict[str, dict] = {}
+    for path, size in sizes.items():
+        nodes[path] = {
             "name": os.path.basename(path) or path,
             "path": path,
-            "size": sizes.get(path, 0),
-            "children": children,
+            "size": size,
+            "children": [],
         }
 
-    return node(root_real)
+    # Link children to parents based on dirname relationship.
+    for child_path, child_size in sizes.items():
+        if child_path == root_real:
+            continue
+        if child_size > 0 and (
+            sizes.get(child_path, 0) > 0 or os.path.isdir(child_path)
+        ):
+            parent_path = os.path.dirname(child_path)
+            if parent_path in nodes:
+                nodes[parent_path]["children"].append(nodes[child_path])
+
+    if root_real in nodes:
+        return nodes[root_real]
+    return {
+        "name": os.path.basename(root_real) or root_real,
+        "path": root_real,
+        "size": sizes.get(root_real, 0),
+        "children": [],
+    }
 
 
 def _run_report(args) -> int:
