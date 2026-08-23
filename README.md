@@ -84,6 +84,29 @@ cleanmac hidden show        # show hidden files
 | `cleanmac app startup disable <label>` | Safely disable one (moves plist + launchctl bootout) |
 
 
+### Uninstall matrix
+
+`cleanmac uninstall` prints a one-row boolean matrix showing where the app
+left state. `Y` = present (will be removed), `N` = absent, `—` = not
+addressable by cleanmac (never deleted):
+
+```
+         app         mas         pkg        brew     support       cache       prefs   container       saved      agents     daemons     helpers        kext         btm
+           N           —           N           N           N           N           N           N           N           N           N           Y           —           —
+```
+
+| Column | Store | Cleared? |
+|---|---|---|
+| `app` | `.app` bundle | yes |
+| `mas` | App Store receipt (inside bundle) | only while bundle lives |
+| `pkg` | `/private/var/db/receipts` | yes |
+| `brew` | Homebrew Caskroom / Cellar | yes |
+| `support` / `cache` / `prefs` / `container` / `saved` | `~/Library` stores | yes |
+| `agents` / `daemons` | LaunchAgents / LaunchDaemons (quarantined, not deleted) | yes |
+| `helpers` | `/Library/PrivilegedHelperTools` (sudo) | yes |
+| `kext` / `btm` | kernel extensions / login items | never (`—`) |
+
+
 Global flags (must appear before subcommand):
 
 | Flag | Default | Description |
