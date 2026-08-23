@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from maccleaner import app_uninstaller as au
 
