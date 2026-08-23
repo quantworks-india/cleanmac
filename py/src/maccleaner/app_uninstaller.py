@@ -945,16 +945,40 @@ def _visible_window(idx: int, total: int, height: int = 15) -> tuple[int, int]:
 def _render_rows(
     apps: list[str], idx: int, start: int, end: int
 ) -> str:
-    """Build a plain block of rows for indices [start, end).
+    """Build a raw-mode-safe block of rows for indices [start, end).
 
-    No full-screen clears, no cursor-home escapes. The selected row is
-    marked with a triangle; others get a space.
+    Joins with CR+LF: in tty.setraw(), a bare LF only moves down and
+    leaves the column, which stairs the list.
     """
     lines: list[str] = []
     for i in range(start, end):
         marker = "▸" if i == idx else " "
         lines.append(f" {marker} {apps[i]}")
-    return "\n".join(lines)
+    return "\r\n".join(lines)
+
+
+def _picker_paint(
+    apps: list[str],
+    idx: int,
+    start: int,
+    end: int,
+    prev_lines: int = 0,
+    filter_text: str = "",
+) -> tuple[str, int]:
+    """Paint one picker frame. Rewind ``prev_lines`` instead of appending.
+
+    Returns (bytes_to_write, line_count_of_this_frame).
+    """
+    body = _render_rows(apps, idx, start, end)
+    hint = f"  filter: {filter_text or '(type to filter)'}"
+    frame_lines = (body.split("\r\n") if body else []) + [hint]
+    n = len(frame_lines)
+    parts: list[str] = []
+    if prev_lines > 0:
+        parts.append(f"\r\x1b[{prev_lines}A")
+    for line in frame_lines:
+        parts.append(f"\r\x1b[2K{line}\r\n")
+    return ("".join(parts), n)
 
 
 def _pick_app_interactive(reporter: Reporter) -> str | None:
@@ -975,22 +999,29 @@ def _pick_app_interactive(reporter: Reporter) -> str | None:
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     query = ""
+    prev_lines = 0
     try:
         tty.setraw(fd)
+        sys.stdout.write("\x1b[?25l")
+        sys.stdout.flush()
         idx = 0
         while True:
-            # Type-to-filter: any printable char appends to the query.
             shown = apps
             if query:
                 q = query.lower()
-                shown = [a for a in apps if q in a.name.lower() or (a.bundle_id and q in a.bundle_id.lower())]
+                shown = [
+                    a
+                    for a in apps
+                    if q in a.name.lower() or (a.bundle_id and q in a.bundle_id.lower())
+                ]
             if idx >= len(shown):
                 idx = max(0, len(shown) - 1)
             start, end = _visible_window(idx, len(shown))
             rows = [a.name for a in shown]
-            block = _render_rows(rows, idx, start, end)
-            prompt = f"\n  filter: {query or '(type to filter)'}\n"
-            sys.stdout.write("\x1b[?25l\x1b[K" + block + prompt)
+            frame, prev_lines = _picker_paint(
+                rows, idx, start, end, prev_lines=prev_lines, filter_text=query
+            )
+            sys.stdout.write(frame)
             sys.stdout.flush()
 
             chunk = os.read(fd, 1)
@@ -1007,18 +1038,20 @@ def _pick_app_interactive(reporter: Reporter) -> str | None:
             elif key == "enter":
                 if shown:
                     chosen = shown[idx].name
-                    sys.stdout.write("\x1b[0m" + f"\nSelected: {chosen}\n")
+                    sys.stdout.write(f"\x1b[0m\x1b[?25h\r\nSelected: {chosen}\r\n")
                     sys.stdout.flush()
                     return chosen
             elif key == "cancel":
-                sys.stdout.write("\x1b[0m\n")
+                sys.stdout.write("\x1b[0m\x1b[?25h\r\n")
                 sys.stdout.flush()
                 return None
-            elif key == "\x7f" or key == "backspace":
+            elif key in ("\x7f", "\x08", "backspace"):
                 query = query[:-1]
             elif len(key) == 1 and key.isprintable():
                 query += key
     finally:
+        sys.stdout.write("\x1b[0m\x1b[?25h")
+        sys.stdout.flush()
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 

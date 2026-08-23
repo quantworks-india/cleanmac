@@ -74,6 +74,22 @@ def test_render_block_never_clears_screen():
     assert "▸ Beta" in block
 
 
+def test_render_rows_uses_crlf_in_raw_mode():
+    """Bare \\n in raw mode stairs the list; lines must end with CR+LF."""
+    block = au._render_rows(["Alpha", "Beta"], idx=0, start=0, end=2)
+    assert "\r\n" in block
+    assert "\n" not in block.replace("\r\n", "")
+
+
+def test_picker_paint_rewinds_previous_frame():
+    """A redraw must move the cursor up, not append another copy."""
+    text, n = au._picker_paint(["A", "B"], idx=0, start=0, end=2, prev_lines=3)
+    assert "\x1b[3A" in text
+    assert "\x1b[H" not in text
+    assert "\x1b[2J" not in text
+    assert n >= 2
+
+
 def test_render_block_shows_window_only():
     """Only the visible window rows are in the block, highlighted marker."""
     apps = [f"App{i}" for i in range(20)]
