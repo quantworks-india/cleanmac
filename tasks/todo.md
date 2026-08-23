@@ -1,93 +1,21 @@
-# Native inventory — task list
+# CLI performance — task list
 
-Source plan: `tasks/plan.md`
+Source plan: `tasks/plan.md`  
+Baseline: see plan table (disk summary 35.5s, startup list 2.5s, app list 0.84s).
 
-## Phase 1: Foundation
+## Phase 1: Disk
 
-## Task 1: Installed-app inventory via system_profiler JSON
+## Task 1: disk summary is depth-1
 
-**Description:** Add a small module (or functions in a new `inventory.py`) that loads installed apps from `system_profiler SPApplicationsDataType -json` and returns structured records (name, path, bundle id if present). Cache once per process. Tests inject fixture JSON so CI never calls the real profiler.
-
-**Acceptance criteria:**
-- [ ] Public API: `list_installed_apps()` / `installed_app_names()` used by callers
-- [ ] Uses `json.loads` only — no regex, no `*.app` glob in the happy path
-- [ ] Process-level cache; tests can reset/inject
-- [ ] Fallback glob documented and only used if profiler fails
-
-**Verification:**
-- [ ] `pytest py/tests/test_inventory.py` (new) passes
-- [ ] `ruff check py/src/ py/tests/`
-
-**Dependencies:** None
-
-**Files likely touched:**
-- `py/src/maccleaner/inventory.py` (new)
-- `py/tests/test_inventory.py` (new)
-
-**Estimated scope:** S
-
-## Task 2: Helper→parent map via attributions.plist
-
-**Description:** Load Apple’s attributions plist with `plistlib` and expose `parent_bundles_for_label(label) -> list[str]` / team-id lookup. Tests use a tiny fixture plist, not the system file.
+**Description:** `disk summary` currently calls `scan(home)`, which walks ~936k paths (~35s) to print immediate children. Size only the first level (native `du -sk` per child, or `du -d 1`). Do not change `disk top` in this task.
 
 **Acceptance criteria:**
-- [ ] No brand dictionary in production code
-- [ ] Missing/unreadable system plist → empty map, no crash
-- [ ] Lookup by launchd label and by program path when the plist provides them
+- [ ] `cleanmac disk summary` does not walk the whole tree
+- [ ] Same children still appear (Library, .colima, …); sizes within noise of current
+- [ ] Existing disk tests updated to the depth-1 contract
 
 **Verification:**
-- [ ] `pytest py/tests/test_attributions.py` passes
-- [ ] `ruff check`
-
-**Dependencies:** None (can land with Task 1)
-
-**Files likely touched:**
-- `py/src/maccleaner/attributions.py` (new)
-- `py/tests/test_attributions.py` (new)
-- `py/tests/fixtures/attributions.plist` (tiny, generic)
-
-**Estimated scope:** S
-
-### Checkpoint: Foundation
-- [ ] All new tests pass
-- [ ] Ruff clean
-- [ ] Human review: cache + fixture look right
-
----
-
-## Phase 2: Cheap native replacements
-
-## Task 3: Memory free-bytes via sysctl
-
-**Description:** Replace `_parse_vm_stat` regex with `sysctl -n` integer reads (`hw.pagesize`, `vm.page_free_count`, `vm.page_speculative_count`). Drop `import re` from `memory.py`.
-
-**Acceptance criteria:**
-- [ ] No `re` in `memory.py`
-- [ ] Free bytes = (free + speculative) * pagesize
-- [ ] Existing `mem free` tests updated to mock `sysctl`, not `vm_stat` text
-
-**Verification:**
-- [ ] `pytest py/tests/test_memory.py`
-- [ ] `ruff check`
-
-**Dependencies:** None
-
-**Files likely touched:**
-- `py/src/maccleaner/memory.py`
-- `py/tests/test_memory.py`
-
-**Estimated scope:** S
-
-## Task 4: Network mounts via diskutil plist
-
-**Description:** Replace `mount(8)` line splitting in `_network_mount_points` with `diskutil list -plist` + `diskutil info -plist` and `plistlib`.
-
-**Acceptance criteria:**
-- [ ] No string-split of `mount` output
-- [ ] Network FS types still skipped (nfs, smbfs, afpfs, webdav, autofs, cifs)
-- [ ] Existing disk tests still pass (mock diskutil plist)
-
-**Verification:**
+- [ ] Re-measure: `cleanmac disk summary` vs 35.5s baseline (target < 3s)
 - [ ] `pytest py/tests/test_disk_analyzer.py`
 - [ ] `ruff check`
 
@@ -99,29 +27,98 @@ Source plan: `tasks/plan.md`
 
 **Estimated scope:** S
 
-### Checkpoint: Cheap replacements
-- [ ] Memory + disk tests green
-- [ ] No `re` in `memory.py`
-- [ ] No `mount` scraper in `disk_analyzer.py`
+## Task 2: disk top/scan without a 936k-path map
+
+**Description:** Full-tree size is still needed for `disk top` / `disk scan`, but `_walk` stores every file path then sorts. Keep dir totals only, or one native `du` invocation. Show progress only if still > 5s.
+
+**Acceptance criteria:**
+- [ ] Peak structure is dirs (or `du` output), not one dict entry per file
+- [ ] Top-N ranking still correct on the existing fixture tree
+- [ ] Home `disk top` re-measured; keep only if clearly faster than ~35s
+
+**Verification:**
+- [ ] Re-measure `cleanmac disk top` (target < 15s)
+- [ ] `pytest py/tests/test_disk_analyzer.py`
+- [ ] If within noise: revert
+
+**Dependencies:** Task 1 (same file)
+
+**Files likely touched:**
+- `py/src/maccleaner/disk_analyzer.py`
+- `py/tests/test_disk_analyzer.py`
+
+**Estimated scope:** M
+
+### Checkpoint: Disk
+- [ ] Summary < 3s
+- [ ] Top improved or Task 2 reverted
+- [ ] Tests + ruff green
 
 ---
 
-## Phase 3: BAA / orphans
+## Phase 2: N+1 Apple CLI
 
-## Task 5: Line-state dumpbtm parser (delete regex)
+## Task 3: startup list without N+1 launchctl / profiler
 
-**Description:** Rewrite `_parse_dumpbtm` to walk lines: detect `Records for UID`, item headers `#N:`, and `Key: value` via `partition(":")`. Delete all `re` usage in `bba.py`. Keep `sfltool dumpbtm` as the source.
+**Description:** `app startup list` loads `system_profiler` for orphan flags and runs `launchctl print` per user plist (no timeout). List view does not need profiler. Live state: one `launchctl print gui/$UID` (or omit state) with a timeout.
 
 **Acceptance criteria:**
-- [ ] `import re` gone from `bba.py`
-- [ ] Existing BBA fixture dump still produces the same 4 items
-- [ ] Associated bundle IDs parsed without regex (strip `[]` and split on comma)
+- [ ] Default `startup list` does not call `system_profiler`
+- [ ] No `launchctl print` per plist
+- [ ] `--orphans-only` still uses inventory
+- [ ] launchctl calls have a timeout
+
+**Verification:**
+- [ ] Re-measure `cleanmac app startup list` vs 2.5s (target < 0.8s)
+- [ ] `pytest py/tests/test_app_uninstaller.py`
+- [ ] `ruff check`
+
+**Dependencies:** None (disjoint from disk after Phase 1)
+
+**Files likely touched:**
+- `py/src/maccleaner/app_uninstaller.py`
+- `py/tests/test_app_uninstaller.py`
+
+**Estimated scope:** S
+
+## Task 4: app list / picker without N× du
+
+**Description:** `list_apps()` runs `du -sk` for every `.app` before anything renders (0.75s for 21 apps; worse with more apps). Picker should list names first. `app list` can size after, or skip size unless asked.
+
+**Acceptance criteria:**
+- [ ] Interactive picker does not `du` every app before first paint
+- [ ] `app list` still shows a size column (compute after listing, or cheaper metadata)
+- [ ] `_find_app` does not need sizes
+
+**Verification:**
+- [ ] Re-measure `cleanmac app list` vs 0.84s (target < 0.4s)
+- [ ] Picker unit tests still pass
+- [ ] `ruff check`
+
+**Dependencies:** Task 3 (same file) — serialize
+
+**Files likely touched:**
+- `py/src/maccleaner/app_uninstaller.py`
+- `py/tests/test_app_uninstaller.py`
+- `py/tests/test_picker.py` (only if picker API changes)
+
+**Estimated scope:** S
+
+## Task 5: sfltool cache + faster fail
+
+**Description:** Healthy `dumpbtm` is fine; hung BTM costs 30s per orphans/bba call. Cache dump in-process. Drop timeout toward 8s. Fail closed (empty list + error), no hang.
+
+**Acceptance criteria:**
+- [ ] Second `find_bba_orphans()` in one process does not re-run `sfltool`
+- [ ] Timeout ≤ 8s; tests cover timeout + cache
+- [ ] Human error still names BTM / sfltool
 
 **Verification:**
 - [ ] `pytest py/tests/test_bba.py`
+- [ ] Manual: `cleanmac app orphans list` fails in ≤ 8s while BTM is wedged
 - [ ] `ruff check`
 
-**Dependencies:** None (parser-only)
+**Dependencies:** None (can follow Task 3)
 
 **Files likely touched:**
 - `py/src/maccleaner/bba.py`
@@ -129,90 +126,44 @@ Source plan: `tasks/plan.md`
 
 **Estimated scope:** S
 
-## Task 6: Mechanical orphan rule
-
-**Description:** Replace `_is_bba_orphan` / `_is_orphan` brand heuristics with: attributions parent + inventory paths + executable/plist existence. Delete `ORPHAN_BRANDS`.
-
-**Acceptance criteria:**
-- [ ] `ORPHAN_BRANDS` deleted
-- [ ] Orphan iff no parent bundle exists and (exe missing or plist missing)
-- [ ] Installed Hermes/Zoom-class fixtures are not flagged; missing Avast-class fixtures are
-
-**Verification:**
-- [ ] `pytest py/tests/test_bba.py py/tests/test_app_uninstaller.py`
-- [ ] `ruff check`
-
-**Dependencies:** Task 1, Task 2, Task 5
-
-**Files likely touched:**
-- `py/src/maccleaner/bba.py`
-- `py/src/maccleaner/app_uninstaller.py`
-- `py/tests/test_bba.py`
-- `py/tests/test_app_uninstaller.py`
-
-**Estimated scope:** M
-
-## Task 7: Collapse dual orphan engines + CLI
-
-**Description:** `find_orphans()` becomes a thin wrapper over BAA inventory (sfltool). Remove plist-directory walk as the primary path. Keep `app orphans list|purge`; make `app bba` an alias (or remove after README update).
-
-**Acceptance criteria:**
-- [ ] One orphan implementation path
-- [ ] `cleanmac app orphans list` and `cleanmac app bba list` same results
-- [ ] Purge still dry-run by default; one sudo prompt on `--commit`
-- [ ] Launch-plist walk only if `sfltool` missing (if we keep fallback)
-
-**Verification:**
-- [ ] `pytest py/tests/`
-- [ ] Manual: `cleanmac app orphans list` and `cleanmac app bba list`
-
-**Dependencies:** Task 6
-
-**Files likely touched:**
-- `py/src/maccleaner/app_uninstaller.py`
-- `py/src/maccleaner/cli.py`
-- `py/tests/test_app_uninstaller.py`
-- `py/tests/test_cli.py`
-
-**Estimated scope:** M
-
-### Checkpoint: Orphans
-- [ ] `import re` gone from `bba.py`
-- [ ] `ORPHAN_BRANDS` gone
-- [ ] Full pytest + ruff green
-- [ ] Human review before CLI alias removal
+### Checkpoint: Interactive
+- [ ] Startup list < 0.8s
+- [ ] App list < 0.4s
+- [ ] Orphans fail-fast ≤ 8s if BTM hung
+- [ ] Tests + ruff
 
 ---
 
-## Phase 4: Close-out
+## Phase 3: Guard
 
-## Task 8: README + residual ps cleanup
+## Task 6: system-data + ledger + regression hook
 
-**Description:** Document native sources. Optional: `ps -o pid=,rss=,comm=` (no header) in `memory.py`. No bash rewrite in this plan.
+**Description:** `disk system-data` is 7.4s of sequential `du` on overlapping Library trees. Size only the listed roots (already) but avoid redundant walks; one `du -sk` list if possible. Add `tasks/perf-ledger.md` with this baseline and each attempt. Add one test that `disk summary` uses the depth-1 path (so we cannot silently revert to `scan(home)`).
 
 **Acceptance criteria:**
-- [ ] README lists `system_profiler`, `sfltool dumpbtm`, `sysctl`, `diskutil -plist`, attributions plist
-- [ ] `app bba` documented as alias if kept
-- [ ] Full suite green
+- [ ] `disk system-data` re-measured; keep only if < 4s or clearly better than 7.4s
+- [ ] `tasks/perf-ledger.md` exists with baseline + Task 1–5 results
+- [ ] A test fails if summary calls full `scan()` again
 
 **Verification:**
-- [ ] `pytest py/tests/`
+- [ ] Re-measure `cleanmac disk system-data`
+- [ ] Full `pytest py/tests/`
 - [ ] `ruff check py/src/ py/tests/`
 
-**Dependencies:** Task 7
+**Dependencies:** Tasks 1–2
 
 **Files likely touched:**
-- `README.md`
-- `py/src/maccleaner/memory.py` (optional ps tweak)
-- `py/tests/test_memory.py`
+- `py/src/maccleaner/disk_analyzer.py`
+- `py/tests/test_disk_analyzer.py`
+- `tasks/perf-ledger.md`
 
 **Estimated scope:** S
 
 ### Checkpoint: Complete
-- [ ] All acceptance criteria met
-- [ ] Ready for review / PR update on `feat/observability`
+- [ ] Budgets met or leftover gaps written in the ledger
+- [ ] Ready for review on `feat/observability`
 
 ## Parallelization notes
 
-- After Task 1 lands: Tasks 3, 4, 5 can run in parallel (disjoint files).
-- Tasks 2, 6, 7 all touch orphan logic — **serialize**; do not parallel-edit `app_uninstaller.py`.
+- After Task 1: Task 5 can run in parallel with Task 2 if nobody else edits `bba.py`.
+- Do not parallel-edit `disk_analyzer.py` or `app_uninstaller.py`.

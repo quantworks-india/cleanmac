@@ -50,12 +50,24 @@ class BbaItem:
         return "unknown"
 
 
-def _run_sfltool_dumpbtm(timeout: float = 30.0) -> str:
+_DUMP_CACHE: str | None = None
+
+
+def reset_dump_cache() -> None:
+    """Clear the in-process sfltool dump cache (tests)."""
+    global _DUMP_CACHE
+    _DUMP_CACHE = None
+
+
+def _run_sfltool_dumpbtm(timeout: float = 8.0) -> str:
     """Call Apple's sfltool dumpbtm. Returns its plain-text dump.
 
-    A short timeout prevents a hung BackgroundTaskManagement daemon from
-    stalling the whole command.
+    Cached once per process. A short timeout prevents a hung
+    BackgroundTaskManagement daemon from stalling the whole command.
     """
+    global _DUMP_CACHE
+    if _DUMP_CACHE is not None:
+        return _DUMP_CACHE
     sfltool = shutil.which("sfltool")
     if not sfltool:
         raise RuntimeError("sfltool not found on PATH (macOS only)")
@@ -71,6 +83,7 @@ def _run_sfltool_dumpbtm(timeout: float = 30.0) -> str:
         raise RuntimeError("sfltool dumpbtm timed out (BTM daemon unresponsive)")
     if r.returncode != 0:
         raise RuntimeError(f"sfltool dumpbtm failed: {r.stderr.strip()}")
+    _DUMP_CACHE = r.stdout
     return r.stdout
 
 

@@ -504,9 +504,56 @@ def test_run_orphans_delegates_to_bba_engine(orphan_home, monkeypatch):
     assert captured["n"] == 1
 
 
+def test_list_apps_skips_du_by_default(monkeypatch):
+    """Picker/find path must not du every .app before first paint."""
+
+    def boom(*_a, **_k):
+        raise AssertionError("du must not run unless size is requested")
+
+    monkeypatch.setattr(au, "dir_size_kb", boom)
+    apps = au.list_apps()
+    assert apps
+    assert all(a.size_kb == 0 for a in apps)
+
+
 def test_legacy_find_orphans_removed():
     """The regex/brand-based find_orphans() is gone (single engine)."""
     assert not hasattr(au, "find_orphans")
     assert not hasattr(au, "_is_orphan")
     assert not hasattr(au, "get_installed_app_names")
     assert not hasattr(au, "ORPHAN_BRANDS")
+
+
+def test_startup_list_does_not_call_inventory(monkeypatch, tmp_path):
+    """Default startup list must not load system_profiler / inventory."""
+    import maccleaner.inventory as inv
+
+    def boom():
+        raise AssertionError("inventory must not run for default list")
+
+    monkeypatch.setattr(inv, "installed_app_names", boom)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    rc = au._startup_list(Reporter(), orphans_only=False)
+    assert rc == 0
+
+
+def test_startup_list_does_not_nplusone_launchctl(monkeypatch, tmp_path):
+    """No launchctl print per plist on default list."""
+    agents = tmp_path / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    (agents / "com.example.one.plist").write_bytes(
+        __import__("plistlib").dumps({"Label": "com.example.one", "Program": "/bin/true"})
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *a, **k):
+        calls.append(list(cmd))
+        from subprocess import CompletedProcess
+        return CompletedProcess(cmd, 1, "", "")
+
+    monkeypatch.setattr(au.subprocess, "run", fake_run)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # Path.home() follows HOME on posix
+    rc = au._startup_list(Reporter(), orphans_only=False)
+    assert rc == 0
+    assert not any(c[:2] == ["launchctl", "print"] for c in calls)

@@ -11,6 +11,13 @@ import pytest
 from maccleaner import bba
 
 
+@pytest.fixture(autouse=True)
+def _clear_sfltool_cache():
+    bba.reset_dump_cache()
+    yield
+    bba.reset_dump_cache()
+
+
 SAMPLE_DUMPBTM = """\
 ========================
  Records for UID 501 : C35DD71D-7B6B-4521-9DE7-617ED61C8D21
@@ -202,6 +209,33 @@ def test_run_sfltool_timeout_raises(monkeypatch):
     monkeypatch.setattr(bba.subprocess, "run", fake_run)
     with pytest.raises(RuntimeError, match="timed out"):
         bba._run_sfltool_dumpbtm(timeout=1)
+
+
+def test_sfltool_dump_is_cached_in_process(monkeypatch):
+    """Second dumpbtm in one process must not re-run sfltool."""
+    n = {"c": 0}
+
+    class FakeRun:
+        returncode = 0
+        stdout = "========================\n"
+        stderr = ""
+
+    def fake_run(*_a, **_k):
+        n["c"] += 1
+        return FakeRun()
+
+    monkeypatch.setattr(bba.shutil, "which", lambda _name: "/usr/bin/sfltool")
+    monkeypatch.setattr(bba.subprocess, "run", fake_run)
+    bba.reset_dump_cache()
+    bba._run_sfltool_dumpbtm()
+    bba._run_sfltool_dumpbtm()
+    assert n["c"] == 1
+
+
+def test_sfltool_default_timeout_is_at_most_8s():
+    import inspect
+    src = inspect.getsource(bba._run_sfltool_dumpbtm)
+    assert "timeout: float = 8" in src or "timeout: float = 8.0" in src
 
 
 # ── Task 5: line-state parser, no regex ─────────────────────────────

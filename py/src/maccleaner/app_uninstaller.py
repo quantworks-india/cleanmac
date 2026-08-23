@@ -73,7 +73,7 @@ def _parse_info_plist(app_path: str) -> tuple[str | None, str | None]:
         return None, None
 
 
-def list_apps() -> list[AppInfo]:
+def list_apps(*, include_size: bool = False) -> list[AppInfo]:
     apps: list[AppInfo] = []
     for d in APP_DIRS:
         if not os.path.isdir(d):
@@ -88,7 +88,7 @@ def list_apps() -> list[AppInfo]:
                     bundle_id=bundle,
                     path=entry.path,
                     version=None,
-                    size_kb=dir_size_kb(entry.path),
+                    size_kb=dir_size_kb(entry.path) if include_size else 0,
                 )
             )
     return sorted(apps, key=lambda a: a.name.lower())
@@ -312,17 +312,19 @@ def _run_startup(args, sudo: Sudo, reporter: Reporter) -> int:
 def _startup_list(reporter: Reporter, orphans_only: bool = False) -> int:
     """List every launch item, with a per-item orphan flag (or filter to orphans).
 
-    Orphan is mechanical: the item is a leftover if its executable is missing
-    AND its label doesn't match an installed app (via the shared inventory).
+    Default list skips system_profiler and per-plist launchctl (those are
+    the slow path). Orphan detection still uses inventory when requested.
     """
-    from maccleaner import inventory
-
     dirs = [
         Path.home() / "Library/LaunchAgents",
         Path("/Library/LaunchAgents"),
         Path("/Library/LaunchDaemons"),
     ]
-    installed_apps = inventory.installed_app_names()
+    installed_apps: set[str] = set()
+    if orphans_only:
+        from maccleaner import inventory
+
+        installed_apps = inventory.installed_app_names()
     rows: list[list[str]] = []
 
     shown = 0
@@ -345,16 +347,7 @@ def _startup_list(reporter: Reporter, orphans_only: bool = False) -> int:
 
             scope = _scope_for_path(str(d))
             state = "?"
-            if scope == "user":
-                r = subprocess.run(
-                    ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                state = "running" if r.returncode == 0 else "stopped"
-
-            orphaned = _is_item_orphan(label, exe, installed_apps)
+            orphaned = _is_item_orphan(label, exe, installed_apps) if orphans_only else False
 
             if orphans_only and not orphaned:
                 continue
@@ -737,7 +730,7 @@ def _pick_app_interactive(reporter: Reporter) -> str | None:
 
 def run(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
     if args.app_cmd == "list":
-        apps = list_apps()
+        apps = list_apps(include_size=True)
         rows = [
             [a.name, a.bundle_id or "", view.human_size(a.size_kb * 1024)]
             for a in apps

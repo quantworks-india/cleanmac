@@ -125,18 +125,22 @@ def _walk(root: str) -> list[dict]:
 def dir_sizes(root: str) -> dict[str, int]:
     """Map of dir path → total size (sum of all descendants).
 
-    Every entry (file or dir) accumulates its size into its parent.
-    Deepest-first ensures a child's total is complete before it rolls
-    into its parent. Root is seeded at 0 so it accumulates correctly.
+    Files are rolled into their parent immediately so the map stays
+    directory-only (home trees have ~10^6 files).
     """
     root = os.path.realpath(root)
     entries = _walk(root)
     sizes: dict[str, int] = {root: 0}
     for e in entries:
-        sizes[e["path"]] = 0 if e["is_dir"] else e["size"]
-    for e in sorted(entries, key=lambda x: len(x["path"]), reverse=True):
-        parent = os.path.dirname(e["path"])
-        sizes[parent] = sizes.get(parent, 0) + sizes[e["path"]]
+        if e["is_dir"]:
+            sizes[e["path"]] = sizes.get(e["path"], 0)
+        else:
+            parent = os.path.dirname(e["path"])
+            sizes[parent] = sizes.get(parent, 0) + e["size"]
+    # Deepest-first so a child's total is complete before it rolls up.
+    for path in sorted((p for p in sizes if p != root), key=len, reverse=True):
+        parent = os.path.dirname(path)
+        sizes[parent] = sizes.get(parent, 0) + sizes[path]
     return sizes
 
 
@@ -186,15 +190,43 @@ def _run_top(args, reporter: Reporter) -> int:
     return 0
 
 
+def _child_sizes(root: str) -> list[tuple[str, int]]:
+    """Size only immediate children via one `du -sk` per child (no full walk)."""
+    root = os.path.realpath(root)
+    if not os.path.isdir(root):
+        raise SystemExit(f"Not a directory: {root}")
+    rows: list[tuple[str, int]] = []
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return rows
+    for entry in entries:
+        try:
+            if entry.is_symlink():
+                continue
+        except OSError:
+            continue
+        out = subprocess.run(
+            ["du", "-sk", entry.path],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if out.returncode != 0 or not out.stdout:
+            continue
+        try:
+            kb = int(out.stdout.split()[0])
+        except (ValueError, IndexError):
+            continue
+        if kb > 0:
+            rows.append((entry.path, kb * 1024))
+    rows.sort(key=lambda kv: kv[1], reverse=True)
+    return rows
+
+
 def _run_summary(args, reporter: Reporter) -> int:
     target = getattr(args, "dir", None) or str(Path.home())
-    sizes, _ = scan(target)
-    root = os.path.realpath(target)
-    top = sorted(
-        ((p, s) for p, s in sizes.items() if os.path.dirname(p) == root and s > 0),
-        key=lambda kv: kv[1],
-        reverse=True,
-    )
+    top = _child_sizes(target)
     rows = [[view.human_size(s), os.path.basename(p) or p] for p, s in top]
     reporter.table("disk_summary", ["Size", "Path"], rows)
     return 0
@@ -214,19 +246,28 @@ def _run_system_data(args, reporter: Reporter) -> int:
         "pip cache": home / "Library/Caches/pip",
         "iOS backups": home / "Library/Application Support/MobileSync/Backup",
     }
+    existing = [(label, p) for label, p in targets.items() if p.exists()]
     rows: list[list[str]] = []
-    for label, p in targets.items():
-        if not p.exists():
-            continue
-        try:
-            out = subprocess.run(
-                ["du", "-sk", str(p)], capture_output=True, text=True, check=False
-            )
-            kb = int(out.stdout.split()[0]) if out.returncode == 0 else 0
-        except (OSError, ValueError, IndexError):
-            kb = 0
-        if kb > 0:
-            rows.append([view.human_size(kb * 1024), label])
+    if existing:
+        out = subprocess.run(
+            ["du", "-sk", *[str(p) for _, p in existing]],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        sized: dict[str, int] = {}
+        for line in out.stdout.splitlines():
+            parts = line.split(None, 1)
+            if len(parts) != 2:
+                continue
+            try:
+                sized[parts[1]] = int(parts[0])
+            except ValueError:
+                continue
+        for label, p in existing:
+            kb = sized.get(str(p), 0)
+            if kb > 0:
+                rows.append([view.human_size(kb * 1024), label])
     reporter.table("system_data", ["Size", "Label"], rows)
     return 0
 

@@ -1,92 +1,103 @@
-# Implementation Plan: Native inventory (zero custom parsers)
+# Implementation Plan: CLI performance
 
 ## Overview
 
-Replace hand-rolled regex, brand dictionaries, and text scrapers with Apple/stdlib structured APIs. Goal: **zero regex, zero `ORPHAN_BRANDS`, zero `vm_stat`/`mount` scrapers**. Two thin line-readers remain because Apple does not publish JSON for `sfltool dumpbtm` or `launchctl print`.
+Measure-first. On this machine the product commands that feel slow are not
+the view layer — they are unbounded filesystem walks and N+1 Apple CLI
+calls. This plan cuts those costs with the same native tools (`du`,
+`launchctl`, `sfltool`), then re-measures. Neutral changes get reverted.
 
-This is a refactor of existing `app orphans` / `app bba` / memory / disk behavior — not a new product surface.
+Replaces the completed CLI-output plan (shipped). One live plan set only.
 
-## Architecture Decisions
+## Baseline (this host, 2026-08-23)
 
-- **Stay on `feat/observability`.** One consolidated feature branch.
-- **Installed apps** come from `system_profiler SPApplicationsDataType -json` (`json.loads`). Cache once per process. Fallback: current two-dir glob only if profiler fails (tests can inject a fake list).
-- **Helper → parent app** comes from Apple’s `attributions.plist` via `plistlib` (documented in Apple Platform Deployment). Path is resolved at runtime; tests inject a fixture plist.
-- **BAA inventory source stays `sfltool dumpbtm`.** Official, text-only. Parse with a line state machine (`splitlines` + `partition(":")`). No `re`.
-- **Launchd live state** stays `launchctl print`. One `startswith("state")` / `partition("=")` line. No `re`.
-- **Memory free bytes** from `sysctl -n hw.pagesize`, `vm.page_free_count`, `vm.page_speculative_count`. Integers only.
-- **Network mounts** from `diskutil list -plist` + `diskutil info -plist` (`plistlib`).
-- **Single orphan engine.** After native inventory works, `find_orphans()` (plist walk + brands) is deleted or reduced to a `sfltool`-missing fallback. CLI: keep `app orphans` as the user command; `app bba` becomes an alias or is removed in the last slice.
-- **Orphan rule (mechanical):** resolve BTM URL / executable / associated bundle IDs; map helper via attributions; live if parent bundle or executable exists; else orphan. No brand substring lists.
-- **Do not** parse `backgrounditems.btm` binaries, add PyObjC/SMAppService enumeration, or parse `launchctl dumpstate`.
-- **PII:** no home-directory or personal paths in tests/docs. Use `tmp_path` and relative paths.
+| Command | Wall | What actually ran |
+|---------|------|-------------------|
+| `disk summary` (home) | **35.5s** | Python walk of **936,608** paths, then rollup — to print ~60 top-level rows |
+| `disk top` / `disk scan` | ~35s | Same full walk |
+| `disk system-data` | **7.4s** | Sequential `du -sk` of large Library trees |
+| `app startup list` | **2.5s** | `system_profiler` (~1.6s) + **one `launchctl print` per user plist** (no timeout) |
+| `app list` | **0.84s** | 21 apps × `du -sk` |
+| `app uninstall --name Code` | 0.44s | OK |
+| `mem heavy` / `hidden show` | 0.08s | OK |
+| `app orphans list` | **30s fail** | `sfltool dumpbtm` hung; timeout already added |
 
-## Task List
+`system_profiler` cold = 1.57s, cache hit = 0.000s (already cached per process).
 
-Tasks live in `tasks/todo.md` (this repo has no external tracker).
+## Architecture decisions
 
-### Phase 1: Foundation (identity)
+- Stay on `feat/observability`.
+- **Match work to the question.** `disk summary` needs only immediate children. `disk top` needs a full size map but must not keep every file path in RAM.
+- Prefer one native `du` over a Python walk of 900k nodes.
+- Do not call `system_profiler` unless orphan detection needs the name set.
+- Do not N+1 `launchctl print`. One dump or skip live state.
+- `sfltool` stays official; cache the dump in-process; keep a hard timeout (consider 8s, fail closed).
+- No new deps. No disk cache of profiler JSON in v1 (PII + staleness).
+- Re-measure the same command after each task. If delta is inside noise, revert.
+- Log attempts in `tasks/perf-ledger.md` (kept and reverted).
 
-- Task 1: Installed-app inventory via `system_profiler -json`
-- Task 2: Helper→parent map via `attributions.plist`
+## Target budgets
 
-### Checkpoint: Foundation
+| Command | Budget |
+|---------|--------|
+| `disk summary` home | < 3s |
+| `disk top` home | < 15s (hard; still a full size job) |
+| `disk system-data` | < 4s |
+| `app startup list` | < 0.8s |
+| `app list` | < 0.4s |
+| `app orphans list` | fail in ≤ 8s if BTM hung; < 3s when `sfltool` is healthy |
+| Interactive picker | no `du` of every app before first paint |
 
-- Tests pass, ruff clean
-- Review: profiler cache + attributions fixture look right
+## Task list
 
-### Phase 2: Cheap native replacements
+See `tasks/todo.md`.
 
-- Task 3: Memory via `sysctl -n`
-- Task 4: Disk mounts via `diskutil … -plist`
+### Phase 1: Disk (the 35s problem)
+- Task 1: `disk summary` = depth-1 only
+- Task 2: `disk top`/`scan` = dir-only rollup or one `du`, no 936k-path dict
 
-### Checkpoint: Cheap replacements
+### Checkpoint: Disk
+- Re-measure summary and top vs baseline
+- Tests + ruff
 
-- Existing memory/disk tests updated and green
-- No `re` in `memory.py`; no `mount(8)` string split in `disk_analyzer.py`
+### Phase 2: N+1 CLI
+- Task 3: `startup list` — no profiler unless orphans; no per-plist `launchctl`
+- Task 4: `list_apps` — lazy/skip size for picker; one-pass sizes for `app list`
+- Task 5: `sfltool` in-process cache + shorter timeout
 
-### Phase 3: BAA / orphans
+### Checkpoint: Interactive
+- Re-measure startup list, app list, orphans
+- Tests + ruff
 
-- Task 5: Line-state `dumpbtm` parser (delete regex)
-- Task 6: Mechanical orphan rule (attributions + inventory)
-- Task 7: Collapse dual orphan engines + CLI
+### Phase 3: Guard
+- Task 6: `disk system-data` one-pass / parallel `du`; perf ledger + a cheap regression test
 
-### Checkpoint: Orphans
+### Checkpoint: Complete
+- Ledger filled; budgets met or documented as remaining
 
-- `cleanmac app orphans list` uses sfltool inventory
-- `ORPHAN_BRANDS` gone
-- `import re` gone from `bba.py`
-
-### Phase 4: Close-out
-
-- Task 8: README + residual `ps` cleanup
-- Checkpoint: Complete — ready for review
-
-## Risks and Mitigations
+## Risks
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| `system_profiler -json` is slow (~1s) | Med | Cache per process; tests inject fixture JSON |
-| `attributions.plist` lives under PrivateFrameworks | Med | Apple documents it; wrap load; empty map if missing |
-| `sfltool dumpbtm` format drifts | High | Line parser + golden fixture from a captured dump (no host PII) |
-| Dual CLI (`orphans` vs `bba`) confuses users mid-refactor | Low | Keep both working until Task 7; then alias |
-| `diskutil info -plist` per volume is N calls | Low | Only inspect volumes from `diskutil list -plist` |
-| Tests currently mock regex parser | Med | Rewrite BBA tests against fixture dump text, not regex internals |
+| `du` output locale/path spaces | Med | `du -sk --` + split on first whitespace (existing pattern) |
+| Depth-1 summary misses nested “where is my space” | Low | That is `disk top`’s job |
+| Skipping launchctl state looks like a feature loss | Med | Keep a `?` or one `launchctl print gui/UID` parse |
+| Shorter sfltool timeout false-fails | Med | 8s; fail closed; message already exists |
+| Parallel `du` thrashes disk | Med | Sequential one-level `du` first; parallel only if still > budget |
 
-## Open Questions
+## Open questions
 
-- Keep `app bba` as a documented alias after collapse, or remove it?
-- Fail closed (no orphans listed) if `sfltool` missing, or fall back to launch-plist walk?
-- Cache `system_profiler` only in-process, or also on disk under the state dir?
+None that block Task 1. Default: no disk cache for profiler.
 
 ## Parallelization
 
-- Tasks 3 and 4 are independent of each other and of Task 5 **after** Task 1 exists (they do not share files with BBA).
-- Do **not** parallel-edit `app_uninstaller.py` (Tasks 2, 6, 7 overlap). Serialize those.
-- Task 5 can start after Task 1 if `bba.py` only *calls* the inventory module, not `app_uninstaller`.
+- Tasks 1–2 share `disk_analyzer.py` — serialize.
+- Tasks 3–4 share `app_uninstaller.py` — serialize.
+- Task 5 (`bba.py`) can follow Task 3 (orphans uses both).
+- Task 6 after disk tasks.
 
 ## Verification (plan-level)
 
-- Every task has acceptance criteria in `tasks/todo.md`
-- Dependencies ordered foundation → cheap replacements → BAA → collapse
-- No task is XL
-- Human approves this plan before implementation
+- Every task has a re-measure step with the same command as the baseline
+- Neutral result = revert
+- Human approves before implementation

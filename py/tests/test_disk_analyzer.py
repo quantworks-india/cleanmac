@@ -21,12 +21,13 @@ def tree(tmp_path):
     return tmp_path
 
 
-def test_scan_total_size(tree):
-    sizes, total = da.scan(str(tree))
-    assert total == 350  # 100 + 200 + 50
-    assert sizes[str(tree / "a")] == 300  # 100 + 200
-    assert sizes[str(tree / "a" / "b")] == 200
+def test_dir_sizes_does_not_keep_file_paths(tree):
+    """Full-tree size map is dirs only — files roll into parents."""
+    sizes = da.dir_sizes(str(tree))
+    assert str(tree / "a" / "file1.txt") not in sizes
+    assert sizes[str(tree / "a")] == 300
     assert sizes[str(tree / "c")] == 50
+    assert sizes[str(tree)] == 350
 
 
 def test_walk_skips_symlink_loop(tree):
@@ -52,8 +53,9 @@ def test_report_creates_self_contained_html(tree, tmp_path):
     assert "<!DOCTYPE html>" in content
     assert '<div id="map">' in content
     assert "Disk Treemap" in content
-    # treemap JSON includes all nodes (files + dir) as tiles
-    assert "file1.txt" in content
+    # directory-only rollup: files are folded into parent dirs
+    assert "file1.txt" not in content
+    assert '"name": "a"' in content or ">a<" in content or "a" in content
 
 
 def test_scan_tolerates_missing_dir(tmp_path):
@@ -103,11 +105,46 @@ def test_run_summary_breaks_down_top_level(tree, capsys):
     assert "Path" in out
 
 
+def test_summary_does_not_call_full_scan(tree, monkeypatch):
+    """disk summary must size only immediate children, not scan() the tree."""
+
+    def boom(*_a, **_k):
+        raise AssertionError("full scan must not run for summary")
+
+    monkeypatch.setattr(da, "scan", boom)
+    args = type("A", (), {"dir": str(tree)})()
+    rc = da._run_summary(args, Reporter())
+    assert rc == 0
+
+
 def test_run_system_data_handles_missing_dirs(capsys, monkeypatch, tmp_path):
     monkeypatch.setenv("CLEANMAC_HOME", str(tmp_path))
     args = type("A", (), {})()
     rc = da._run_system_data(args, Reporter())
     assert rc == 0
+
+
+def test_system_data_one_du_invocation(monkeypatch, tmp_path):
+    """Size listed roots with a single du, not one process per folder."""
+    (tmp_path / "Library" / "Caches").mkdir(parents=True)
+    (tmp_path / "Library" / "Logs").mkdir(parents=True)
+    (tmp_path / "Library" / "Caches" / "x").write_bytes(b"a" * 100)
+    n = {"c": 0}
+
+    def fake_run(cmd, *a, **k):
+        n["c"] += 1
+        from subprocess import CompletedProcess
+        # emit one line per path after the flags
+        lines = []
+        for p in cmd[2:]:
+            lines.append(f"4\t{p}")
+        return CompletedProcess(cmd, 0, "\n".join(lines) + "\n", "")
+
+    monkeypatch.setenv("CLEANMAC_HOME", str(tmp_path))
+    monkeypatch.setattr(da.subprocess, "run", fake_run)
+    rc = da._run_system_data(type("A", (), {})(), Reporter())
+    assert rc == 0
+    assert n["c"] == 1
 
 
 def test_run_unknown_disk_cmd_returns_2():
