@@ -10,6 +10,7 @@ import glob
 import os
 import plistlib
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -152,6 +153,58 @@ def _system_paths(app: AppInfo) -> list[str]:
     return sorted(set(found))
 
 
+def _build_fingerprint(app: AppInfo, home: Path | None = None) -> dict:
+    """Find every launch plist + leftover owned by ``app``.
+
+    Mechanical ownership: a launch item belongs to the app if its label equals
+    the app's bundle id, or its executable lives inside the app bundle. No
+    substring/brand guessing.
+    """
+    home = home or Path(os.environ.get("CLEANMAC_HOME", Path.home()))
+    bundle = app.bundle_id or ""
+    app_dir = os.path.dirname(app.path)
+
+    launch_dirs = [
+        home / "Library" / "LaunchAgents",
+        Path("/Library/LaunchAgents"),
+        Path("/Library/LaunchDaemons"),
+    ]
+    launch_labels: list[str] = []
+    launch_paths: list[str] = []
+    for d in launch_dirs:
+        if not d.is_dir():
+            continue
+        for plist in d.glob("*.plist"):
+            label = plist.stem
+            exe = None
+            try:
+                with plist.open("rb") as f:
+                    data = plistlib.load(f)
+                label = data.get("Label", label)
+                prog = data.get("Program")
+                args = data.get("ProgramArguments") or []
+                exe = str(prog or (args[0] if args else ""))
+            except (OSError, plistlib.InvalidFileException, PermissionError):
+                pass
+            owned = False
+            if bundle and label.lower() == bundle.lower():
+                owned = True
+            if exe and app_dir and exe.startswith(app_dir):
+                owned = True
+            if owned:
+                launch_labels.append(label)
+                launch_paths.append(str(plist))
+
+    # User leftovers (Application Support, Caches, Containers, Preferences...)
+    leftovers = _user_paths(app) if home else []
+
+    return {
+        "launch_labels": launch_labels,
+        "launch_paths": launch_paths,
+        "leftovers": leftovers,
+    }
+
+
 def _run_remove(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
     app = _find_app(args.app, force=args.force)
     reporter.info(
@@ -175,6 +228,52 @@ def _run_remove(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
     deleter.delete("app_remove", user)
     deleter.delete("app_remove", sys_paths, sudo=sudo)
     return 0
+
+
+def _run_uninstall(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
+    """Deep uninstall: app bundle + leftovers + owned launch plists.
+
+    Dry-run by default. On --commit it deletes the bundle and leftovers via
+    the Deleter, then bootout + quarantines any launch plist owned by the app.
+    """
+    app = _find_app(args.name, force=args.force if hasattr(args, "force") else False)
+    reporter.info(
+        "uninstall_app",
+        name=app.name,
+        bundle_id=app.bundle_id,
+        path=app.path,
+    )
+    fp = _build_fingerprint(app)
+    user = fp["leftovers"]
+    sys_paths = _system_paths(app)
+    reporter.info(
+        "uninstall_fingerprint",
+        launch_labels=fp["launch_labels"],
+        launch_paths=fp["launch_paths"],
+        user_count=len(user),
+        system_count=len(sys_paths),
+    )
+
+    if not deleter.commit:
+        reporter.info("uninstall_dryrun", app=app.name, count=len(fp["launch_labels"]))
+        return 0
+
+    # 1. Remove app bundle + user/system leftovers
+    deleter.delete("app_uninstall", [app.path])
+    deleter.delete("app_uninstall", user)
+    deleter.delete("app_uninstall", sys_paths, sudo=sudo)
+
+    # 2. Bootout + quarantine owned launch plists
+    orphans = [
+        Orphan(
+            label=label,
+            path=path,
+            exe=None,
+            scope="system" if "LaunchDaemons" in path or "/Library/LaunchAgents" in path else "user",
+        )
+        for label, path in zip(fp["launch_labels"], fp["launch_paths"])
+    ]
+    return _orphans_purge(orphans, deleter, sudo, reporter, yes=getattr(args, "yes", False))
 
 
 def _scope_for_path(path: str) -> str:
@@ -547,6 +646,29 @@ def _run_update(reporter: Reporter) -> int:
     return 0
 
 
+def _pick_app_interactive(reporter: Reporter) -> str | None:
+    """Show a numbered list of apps; return the chosen name (or None)."""
+    apps = list_apps()
+    if not apps:
+        reporter.warn("no_apps_installed")
+        return None
+    reporter.info("uninstall_picker_header", columns=["#", "Name", "Bundle ID", "Size"])
+    for i, a in enumerate(apps, 1):
+        reporter.info("uninstall_picker_row", index=i, name=a.name, bundle_id=a.bundle_id or "", size_kb=a.size_kb)
+    try:
+        raw = input("Select app number (or 0 to cancel): ").strip()
+    except EOFError:
+        return None
+    if not raw.isdigit():
+        reporter.warn("uninstall_invalid_choice", value=raw)
+        return None
+    idx = int(raw)
+    if idx < 1 or idx > len(apps):
+        reporter.warn("uninstall_invalid_choice", value=raw)
+        return None
+    return apps[idx - 1].name
+
+
 def run(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
     if args.app_cmd == "list":
         apps = list_apps()
@@ -565,6 +687,19 @@ def run(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
         return 0
     if args.app_cmd == "remove":
         return _run_remove(args, deleter, sudo, reporter)
+    if args.app_cmd == "uninstall":
+        # Interactive picker when no --name given and stdin is a TTY.
+        if not getattr(args, "name", None):
+            if sys.stdin.isatty():
+                picked = _pick_app_interactive(reporter)
+                if not picked:
+                    reporter.warn("uninstall_cancelled")
+                    return 0
+                args = type("B", (), {**vars(args), "name": picked})()
+            else:
+                reporter.error("usage", msg="use --name <app> when not interactive")
+                return 2
+        return _run_uninstall(args, deleter, sudo, reporter)
     if args.app_cmd == "reset":
         app = _find_app(args.app)
         home = Path(os.environ.get("CLEANMAC_HOME", Path.home()))

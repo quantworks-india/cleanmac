@@ -72,6 +72,8 @@ cleanmac hidden show        # show hidden files
 | `cleanmac mem heavy` | List top CPU/RAM consumers |
 | `cleanmac hidden show` | Show hidden files in Finder |
 | `cleanmac hidden hide` | Hide hidden files in Finder |
+| `cleanmac app uninstall` | **Deep interactive uninstall** (app + leftovers + launch agents; dry-run) |
+| `cleanmac app uninstall --name <app>` | Deep uninstall a specific app (non-interactive) |
 | `cleanmac app startup list` | List all LaunchAgents/LaunchDaemons with state |
 | `cleanmac app startup list --orphans-only` | **List only orphaned agents from apps you no longer have installed** |
 | `cleanmac app orphans` | Shortcut for the above |
