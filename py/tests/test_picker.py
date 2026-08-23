@@ -44,3 +44,49 @@ def test_resolve_pick_pure():
     assert apps[idx] == "Gamma"
     idx = au._move_cursor(idx, au._parse_key(b"\x1b[A"), 3)  # up -> 1
     assert apps[idx] == "Beta"
+
+
+def test_window_centers_on_selection():
+    """_visible_window returns a window around idx, capped by total."""
+    w = au._visible_window(idx=5, total=20, height=7)
+    assert w == (2, 9)  # 7 rows: idx at center-ish
+    assert (w[1] - w[0]) == 7
+
+
+def test_window_clamps_to_top():
+    assert au._visible_window(idx=0, total=20, height=5) == (0, 5)
+
+
+def test_window_clamps_to_bottom():
+    assert au._visible_window(idx=19, total=20, height=5) == (15, 20)
+
+
+def test_window_smaller_than_height():
+    assert au._visible_window(idx=1, total=3, height=10) == (0, 3)
+
+
+def test_render_block_never_clears_screen():
+    """The picker must not emit full-screen wipe escapes (ESC[H ESC[J)."""
+    apps = ["Alpha", "Beta", "Gamma"]
+    block = au._render_rows(apps, idx=1, start=0, end=3)
+    assert "\x1b[H" not in block
+    assert "\x1b[J" not in block
+    assert "▸ Beta" in block
+
+
+def test_render_block_shows_window_only():
+    """Only the visible window rows are in the block, highlighted marker."""
+    apps = [f"App{i}" for i in range(20)]
+    block = au._render_rows(apps, idx=5, start=2, end=9)
+    assert "App2" in block and "App8" in block
+    assert "App0" not in block and "App9" not in block
+    assert "▸ App5" in block
+
+
+def test_render_block_shows_query_filter():
+    """When a filter is set, only matching apps are shown."""
+    apps = ["Alpha", "Beta", "Alpaca", "Gamma"]
+    filtered = [a for a in apps if "al" in a.lower()]
+    block = au._render_rows(filtered, idx=0, start=0, end=len(filtered))
+    assert "Alpha" in block and "Alpaca" in block
+    assert "Beta" not in block and "Gamma" not in block

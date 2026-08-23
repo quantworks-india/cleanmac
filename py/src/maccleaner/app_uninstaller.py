@@ -865,11 +865,39 @@ def _move_cursor(idx: int, key: str, total: int) -> int:
     return idx
 
 
+def _visible_window(idx: int, total: int, height: int = 15) -> tuple[int, int]:
+    """Return a (start, end) slice of ``total`` rows centered on ``idx``.
+
+    Never clears the screen; the caller redraws only this window.
+    """
+    if total <= height:
+        return (0, total)
+    half = height // 2
+    start = max(0, min(idx - half, total - height))
+    return (start, start + height)
+
+
+def _render_rows(
+    apps: list[str], idx: int, start: int, end: int
+) -> str:
+    """Build a plain block of rows for indices [start, end).
+
+    No full-screen clears, no cursor-home escapes. The selected row is
+    marked with a triangle; others get a space.
+    """
+    lines: list[str] = []
+    for i in range(start, end):
+        marker = "▸" if i == idx else " "
+        lines.append(f" {marker} {apps[i]}")
+    return "\n".join(lines)
+
+
 def _pick_app_interactive(reporter: Reporter) -> str | None:
     """Show an arrow-key navigable list of apps; return the chosen name.
 
-    Up/Down to move, Enter to select, q / Esc / Ctrl-C to cancel. Uses only
-    stdlib termios/tty/ANSI escapes — no third-party dependency.
+    Up/Down to move, Enter to select, type to filter, q / Esc / Ctrl-C to
+    cancel. Redraws only a small window of rows — never clears the whole
+    screen. stdlib termios/tty only.
     """
     apps = list_apps()
     if not apps:
@@ -881,40 +909,50 @@ def _pick_app_interactive(reporter: Reporter) -> str | None:
 
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
+    query = ""
     try:
         tty.setraw(fd)
         idx = 0
         while True:
-            # Redraw the list from the current cursor position.
-            rows = []
-            for i, a in enumerate(apps):
-                marker = "▸" if i == idx else " "
-                rows.append(f" {marker} {a.name}  {a.bundle_id or ''}")
-            block = "\x1b[?25l" + "\n".join(rows) + "\x1b[0m"
-            sys.stdout.write("\x1b[H\x1b[J" + block + "\n")
+            # Type-to-filter: any printable char appends to the query.
+            shown = apps
+            if query:
+                q = query.lower()
+                shown = [a for a in apps if q in a.name.lower() or (a.bundle_id and q in a.bundle_id.lower())]
+            if idx >= len(shown):
+                idx = max(0, len(shown) - 1)
+            start, end = _visible_window(idx, len(shown))
+            rows = [a.name for a in shown]
+            block = _render_rows(rows, idx, start, end)
+            prompt = f"\n  filter: {query or '(type to filter)'}\n"
+            sys.stdout.write("\x1b[?25l\x1b[K" + block + prompt)
             sys.stdout.flush()
 
             chunk = os.read(fd, 1)
             if chunk == b"\x1b":
-                # read the rest of an escape sequence
                 more = os.read(fd, 2)
                 key = _parse_key(chunk + more)
             else:
                 key = _parse_key(chunk)
 
             if key == "down":
-                idx = _move_cursor(idx, "down", len(apps))
+                idx = _move_cursor(idx, "down", len(shown))
             elif key == "up":
-                idx = _move_cursor(idx, "up", len(apps))
+                idx = _move_cursor(idx, "up", len(shown))
             elif key == "enter":
-                chosen = apps[idx].name
-                sys.stdout.write("\x1b[K" + "\x1b[0m" + f"\nSelected: {chosen}\n")
-                sys.stdout.flush()
-                return chosen
+                if shown:
+                    chosen = shown[idx].name
+                    sys.stdout.write("\x1b[0m" + f"\nSelected: {chosen}\n")
+                    sys.stdout.flush()
+                    return chosen
             elif key == "cancel":
                 sys.stdout.write("\x1b[0m\n")
                 sys.stdout.flush()
                 return None
+            elif key == "\x7f" or key == "backspace":
+                query = query[:-1]
+            elif len(key) == 1 and key.isprintable():
+                query += key
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
