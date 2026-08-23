@@ -11,13 +11,12 @@ Pair ``find_bba_orphans()`` with ``launchctl print`` to surface live state
 
 from __future__ import annotations
 
-import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from maccleaner.app_uninstaller import get_installed_app_names
+from maccleaner import inventory
 
 
 @dataclass
@@ -67,85 +66,109 @@ def _run_sfltool_dumpbtm() -> str:
     return r.stdout
 
 
+def _split_field_line(line: str) -> tuple[str, str, str]:
+    """Split a 'Key: value' line on the first ':'.
+
+    Returns (key, sep, value). sep is ':' on success, '' if no colon.
+    """
+    head, sep, val = line.strip().partition(":")
+    return head, sep, val.strip()
+
+
 def _parse_dumpbtm(dump: str) -> list[BbaItem]:
     """Parse the plain-text output of sfltool dumpbtm into BbaItem records.
 
-    The output is structured as:
+    Uses a line-state machine (splitlines + startswith/partition), no regex.
+    Structure:
 
         ========================
          Records for UID <n>
         ========================
-
          Items:
-
          #1:
                          UUID: ...
                         Name: ...
-              Developer Name: ...
                   Identifier: ...
-                       URL: ...
-            Executable Path: ...
-
-    We split on UID sections, then walk each item block.
     """
     items: list[BbaItem] = []
-    # Each "Records for UID N" section
-    uid_sections = re.split(r"^={20,}\s*$\s*Records for UID\s+(-?\d+)\s*:.*?\n={20,}\s*$",
-                            dump, flags=re.MULTILINE)
-    # uid_sections[0] is preamble (empty), then alternating uid, content, uid, content...
-    for i in range(1, len(uid_sections), 2):
-        uid_str = uid_sections[i]
-        body = uid_sections[i + 1]
-        try:
-            uid_val = int(uid_str)
-        except ValueError:
+    uid_val: int | None = None
+    in_items = False
+    current: dict[str, str] | None = None
+
+    def _flush() -> None:
+        nonlocal current
+        if current:
+            item = _build_item(current, uid_val)
+            if item:
+                items.append(item)
+            current = None
+
+    for raw in dump.splitlines():
+        line = raw.strip()
+
+        if line.startswith("Records for UID"):
+            # e.g. "Records for UID 501 : UUID"
+            _flush()
+            uid_val = _parse_uid(line)
+            in_items = False
             continue
-        items.extend(_parse_uid_section(uid_val, body))
+
+        if line.startswith("Items:"):
+            in_items = True
+            continue
+
+        if not in_items:
+            continue
+
+        if line.startswith("#") and line.endswith(":"):
+            # new item header
+            _flush()
+            current = {}
+            continue
+
+        if current is None:
+            continue
+
+        key, sep, val = _split_field_line(line)
+        if not sep:
+            continue
+        if key == "Assoc. Bundle IDs":
+            # value is "[ com.a, com.b ]"
+            current["Assoc. Bundle IDs"] = val
+            continue
+        # Last occurrence wins for repeated keys (e.g. Embedded Item IDs).
+        current[key] = val
+
+    _flush()
+
     return items
 
 
-def _parse_uid_section(uid_val: int, body: str) -> list[BbaItem]:
-    out: list[BbaItem] = []
-    # Find each item block starting with "#<n>:" at line start
-    # Split on lines that start with "^ #\d+:" at column 0
-    blocks = re.split(r"(?m)^ #(\d+):\s*$", body)
-    # blocks[0] = preamble (e.g. " Items: ..."), then alternating num, content, num, content
-    for j in range(1, len(blocks), 2):
-        content = blocks[j + 1]
-        item = _parse_item_block(uid_val, content)
-        if item is not None:
-            out.append(item)
-    return out
+def _parse_uid(line: str) -> int | None:
+    """Extract the numeric UID from 'Records for UID N : ...'."""
+    rest = line.replace("Records for UID", "", 1).strip()
+    rest = rest.split(":", 1)[0].strip()
+    try:
+        return int(rest)
+    except ValueError:
+        return None
 
 
-def _parse_item_block(uid_val: int, content: str) -> BbaItem | None:
-    """Extract fields from one item block."""
-    fields: dict[str, str] = {}
-    # Each field: "  <Key>: <Value>"  — value may be "(null)" or list
-    # Lines look like: "                 UUID: 1577B2B7-..."
-    for line in content.splitlines():
-        m = re.match(r"^\s+([A-Za-z][A-Za-z ]*?):\s+(.*)$", line)
-        if m:
-            key = m.group(1).strip()
-            val = m.group(2).strip()
-            # Last occurrence wins (for Embedded Item Identifiers etc.)
-            fields[key] = val
-
+def _build_item(fields: dict[str, str], uid: int | None) -> BbaItem | None:
+    """Build a BbaItem from a collected field dict, or None for parent rows."""
     identifier = fields.get("Identifier", "")
-    # Skip the "parent" entries that don't reference a specific plist job
-    # (they have "(null)" URL and no numeric prefix in identifier).
-    if not identifier:
-        return None
-    # Skip records whose Identifier is itself a developer name (e.g. "Zoom",
-    # "Google LLC") — those are parent entries; their child entries follow.
-    if not identifier[0].isdigit():
+    # Skip parent entries that don't reference a specific plist job
+    # (no numeric launchd prefix in identifier).
+    if not identifier or not identifier[0].isdigit():
         return None
 
-    associated = []
-    # "Assoc. Bundle IDs: [ com.google.Chrome, com.google.drivefs ]"
-    m = re.search(r"Assoc\. Bundle IDs:\s*\[\s*([^\]]+?)\s*\]", content)
-    if m:
-        associated = [s.strip() for s in m.group(1).split(",")]
+    associated: list[str] = []
+    assoc_raw = fields.get("Assoc. Bundle IDs", "")
+    if assoc_raw:
+        inner = assoc_raw.strip()
+        if inner.startswith("[") and inner.endswith("]"):
+            inner = inner[1:-1]
+        associated = [s.strip() for s in inner.split(",") if s.strip()]
 
     return BbaItem(
         name=fields.get("Name", "") or "",
@@ -154,7 +177,7 @@ def _parse_item_block(uid_val: int, content: str) -> BbaItem | None:
         plist_url=fields.get("URL", "") if fields.get("URL") != "(null)" else "",
         executable_path=fields.get("Executable Path", "") if fields.get("Executable Path") != "(null)" else "",
         disposition=fields.get("Disposition", ""),
-        uid=uid_val,
+        uid=uid,
         uuid=fields.get("UUID", ""),
         last_use=fields.get("Last Use", ""),
         associated_bundle_ids=associated,
@@ -177,85 +200,81 @@ def fetch_state(item: BbaItem) -> str:
     )
     if r.returncode != 0:
         return "not registered"
-    # Parse "state = ..." line
-    m = re.search(r"^\s*state\s*=\s*(.+?)\s*$", r.stdout, re.MULTILINE)
-    if m:
-        return m.group(1).strip()
+    # Parse "state = ..." line via startswith/partition (no regex).
+    for raw in r.stdout.splitlines():
+        line = raw.strip()
+        if line.startswith("state"):
+            head, sep, val = line.partition("=")
+            if sep and val.strip():
+                return val.strip()
     return "unknown"
 
 
 def _is_bba_orphan(item: BbaItem, installed_apps: set[str]) -> bool:
     """True if this BBA item's app/daemon is gone or stub.
 
-    Decision tree (any positive match means live):
+    Mechanical rule (no hardcoded vendor/brand dictionary):
 
-    - Associated bundle IDs match an installed app by name or by ``.app``
-      directory lookup.
-    - Developer name or parent identifier substring matches an installed app.
-    - Plist URL points under a path that contains an installed app's name
-      (e.g. ``/Users/x/.hermes/.../Hermes.app/...``).
+    1. If any associated bundle ID matches an installed app → live.
+    2. If the item's name/developer/parent matches an installed app's name
+       (e.g. "Zoom", "WhatsApp", "Google Drive") → live.
+    3. If the helper's executable still exists on disk → live.
+    4. If the helper's plist URL still exists on disk → live.
+    5. Otherwise → orphan.
 
-    Otherwise we declare orphan if:
-    - Executable path is missing
-    - Plist URL is missing
-    - Developer / name matches a known-bad-uninstaller brand AND no
-      installed app contains that brand.
+    ``installed_apps`` is a set of lowercase `.app` basenames (e.g.
+    ``"zoom.us.app"``) from the inventory module.
     """
-    # ── Live signals ──────────────────────────────────────────────
-    def _name_in_installed(s: str) -> bool:
-        s = s.lower()
-        return any(s in a or s.replace(".app", "") in a for a in installed_apps)
-
-    # 1. Associated bundle IDs
+    # 1. Associated bundle IDs (the parent app attribution)
     for bid in item.associated_bundle_ids:
-        if _name_in_installed(bid):
-            return False
-        if (Path("/Applications") / f"{bid}.app").is_dir():
-            return False
-        if (Path.home() / "Applications" / f"{bid}.app").is_dir():
+        if _bundle_installed(bid, installed_apps):
             return False
 
-    # 2. Developer name or parent identifier
-    for s in (item.developer, item.parent_identifier, item.name):
-        if s and _name_in_installed(s):
+    # 2. Name / developer / parent identifier matches an installed app
+    for s in (item.name, item.developer, item.parent_identifier):
+        if s and _name_installed(s, installed_apps):
             return False
 
-    # 3. Plist URL contains an installed app name (e.g. Hermes.app nested
-    # under a non-standard install path).
-    if item.plist_url:
-        plist_lower = item.plist_url.lower()
-        for app in installed_apps:
-            stem = app.replace(".app", "").strip()
-            if stem and stem in plist_lower:
-                return False
+    # 3. Live executable on disk
+    if item.executable_path and Path(item.executable_path).exists():
+        return False
 
-    # 4. Executable path contains an installed app name (login items
-    # nested inside an app bundle, etc.)
-    if item.executable_path:
-        exe_lower = item.executable_path.lower()
-        for app in installed_apps:
-            stem = app.replace(".app", "").strip()
-            if stem and stem in exe_lower:
-                return False
+    # 4. Live plist on disk (absolute only; relative URL is a broken item)
+    if item.plist_url and item.plist_url.startswith("/") and Path(item.plist_url).exists():
+        return False
 
-    # ── Orphan signals ─────────────────────────────────────────────
-    # Executable missing
-    if item.executable_path and not Path(item.executable_path).exists():
-        return True
-    # Plist missing
-    if item.plist_url and not Path(item.plist_url).exists():
-        return True
+    return True
 
-    # 5. Known-bad-uninstaller brand + no installed match
-    from maccleaner.app_uninstaller import ORPHAN_BRANDS
-    haystack = " ".join(
-        str(x or "").lower() for x in (item.developer, item.name, item.parent_identifier)
-    )
-    for brand, triggers in ORPHAN_BRANDS.items():
-        if any(t in haystack for t in triggers):
-            if not any(brand in a or any(t in a for t in triggers) for a in installed_apps):
+
+def _name_installed(s: str, installed_apps: set[str]) -> bool:
+    """True if a display name / developer matches an installed app."""
+    s = s.strip().lower()
+    if not s:
+        return False
+    for app in installed_apps:
+        stem = app[:-4] if app.endswith(".app") else app
+        stem = stem.lower()
+        if stem and (s == stem or s in stem or stem in s):
+            return True
+    return False
+
+
+def _bundle_installed(bundle_id: str, installed_apps: set[str]) -> bool:
+    """True if a bundle id maps to an installed app bundle."""
+    bid = bundle_id.lower()
+    for app in installed_apps:
+        stem = app[:-4] if app.endswith(".app") else app
+        stem = stem.lower()
+        # e.g. "com.google.Chrome" vs "google chrome.app" -> both contain
+        # the last meaningful token. Compare last dot-segment to stem.
+        tail = bid.rsplit(".", 1)[-1]
+        if tail and (tail in stem or stem in tail):
+            return True
+    # Direct `.app` directory lookup by bundle-id-derived name.
+    for base in (Path("/Applications"), Path.home() / "Applications"):
+        for name in (bundle_id, bundle_id.replace(".", " ")):
+            if (base / f"{name}.app").is_dir():
                 return True
-
     return False
 
 
@@ -271,7 +290,7 @@ def find_bba_orphans(*, include_state: bool = False) -> list[BbaItem]:
     """
     dump = _run_sfltool_dumpbtm()
     all_items = _parse_dumpbtm(dump)
-    installed = get_installed_app_names()
+    installed = inventory.installed_app_names()
     orphans = []
     for item in all_items:
         if _is_bba_orphan(item, installed):

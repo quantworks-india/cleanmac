@@ -113,19 +113,33 @@ def test_parse_dumpbtm_extracts_scope(stub_sfltool):
     assert by_label["com.apple.weather.menu"].scope == "system"  # 16.* = system
 
 
-def test_find_bba_orphans_flags_uninstalled_app(stub_sfltool, fake_home, monkeypatch):
-    """Avast is in the dump but no app bundle is installed -> orphan."""
-    # Suppress fetch_state / launchctl
+def test_find_bba_orphans_flags_uninstalled_app(fake_home, monkeypatch, tmp_path):
+    """Avast exe/plist missing in sandbox -> orphan."""
+    # Point Avast's exe at a nonexistent sandbox path (no real /Library leak).
+    dump = SAMPLE_DUMPBTM.replace(
+        "Executable Path: /Library/Application Support/AvastHUB/com.avast.hub.app/Contents/MacOS/com.avast.hub",
+        f"Executable Path: {tmp_path}/no-avast-hub",
+    )
+    monkeypatch.setattr(bba, "_run_sfltool_dumpbtm", lambda: dump)
     monkeypatch.setattr(bba, "fetch_state", lambda it: "?")
+    # Isolate installed inventory (empty so no name-match rescues Avast).
+    monkeypatch.setattr(bba.inventory, "installed_app_names", lambda: set())
     orphans = bba.find_bba_orphans()
     labels = {o.label for o in orphans}
     assert "com.avast.hub" in labels
-    assert "com.avast.helper" not in {o.label for o in orphans}  # bundle ID, not label
 
 
-def test_find_bba_orphans_keeps_live_app(stub_sfltool, fake_home, monkeypatch):
-    """Hermes is installed (real bundle in fake_home) -> NOT orphan."""
+def test_find_bba_orphans_keeps_live_app(fake_home, monkeypatch, tmp_path):
+    """Hermes is live when its executable exists on disk (mechanical)."""
+    hermes_exe = tmp_path / "Hermes"
+    hermes_exe.write_text("x")
+    dump = SAMPLE_DUMPBTM.replace(
+        "Executable Path: /Users/test/.hermes/Hermes.app/Contents/MacOS/Hermes",
+        f"Executable Path: {hermes_exe}",
+    )
+    monkeypatch.setattr(bba, "_run_sfltool_dumpbtm", lambda: dump)
     monkeypatch.setattr(bba, "fetch_state", lambda it: "?")
+    monkeypatch.setattr(bba.inventory, "installed_app_names", lambda: set())
     orphans = bba.find_bba_orphans()
     labels = {o.label for o in orphans}
     assert "com.nousresearch.hermes" not in labels
@@ -134,23 +148,26 @@ def test_find_bba_orphans_keeps_live_app(stub_sfltool, fake_home, monkeypatch):
 def test_find_bba_orphans_flags_broken_relative_plist(stub_sfltool, fake_home, monkeypatch):
     """com.apple.weather.menu has a relative plist URL -> not a real path -> orphan."""
     monkeypatch.setattr(bba, "fetch_state", lambda it: "?")
+    monkeypatch.setattr(bba.inventory, "installed_app_names", lambda: set())
     orphans = bba.find_bba_orphans()
     labels = {o.label for o in orphans}
     assert "com.apple.weather.menu" in labels
 
 
-def test_find_bba_orphans_keeps_zoom(stub_sfltool, fake_home, monkeypatch):
-    """Zoom's plist/exe path exists on the real filesystem. Don't flag
-    unless we can prove the app is gone. (Without real /Library, the
-    executable check passes; so it shows up as 'live'.)"""
+def test_find_bba_orphans_keeps_zoom(stub_sfltool, fake_home, monkeypatch, tmp_path):
+    """Zoom's plist/exe exists on disk -> not orphan."""
+    zoom_exe = tmp_path / "us.zoom.ZoomDaemon"
+    zoom_exe.write_text("x")
+    dump = SAMPLE_DUMPBTM.replace(
+        "Executable Path: /Library/PrivilegedHelperTools/us.zoom.ZoomDaemon",
+        f"Executable Path: {zoom_exe}",
+    )
+    monkeypatch.setattr(bba, "_run_sfltool_dumpbtm", lambda: dump)
     monkeypatch.setattr(bba, "fetch_state", lambda it: "?")
+    monkeypatch.setattr(bba.inventory, "installed_app_names", lambda: set())
     orphans = bba.find_bba_orphans()
     labels = {o.label for o in orphans}
-    # Zoom plist URL is /Library/LaunchDaemons/us.zoom.ZoomDaemon.plist
-    # which doesn't exist in our test sandbox -> orphan (correct behaviour
-    # in our sandbox). On a real Mac it would NOT be orphan (file exists).
-    # So just assert that the detection is at least deterministic.
-    assert isinstance(labels, set)
+    assert "us.zoom.ZoomDaemon" not in labels
 
 
 def test_sfltool_not_found_raises(tmp_path, monkeypatch):
@@ -172,3 +189,112 @@ def test_run_sfltool_failure_raises(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="sfltool dumpbtm failed"):
         bba._run_sfltool_dumpbtm()
+
+
+# ── Task 5: line-state parser, no regex ─────────────────────────────
+
+def test_bba_module_does_not_import_re():
+    """bba.py must not depend on the re module for dumpbtm parsing."""
+    assert not hasattr(bba, "re"), "bba.py still imports re"
+
+
+def test_orphan_uses_attributions_not_brands(monkeypatch):
+    """A helper with no attributions parent and no live exe/plist is orphan,
+    regardless of brand name. No ORPHAN_BRANDS lookup."""
+    item = bba.BbaItem(
+        name="Generic Helper",
+        developer="Acme",
+        identifier="16.com.acme.helper",
+        plist_url="",
+        executable_path="",
+        disposition="",
+    )
+    assert bba._is_bba_orphan(item, set()) is True
+    assert not hasattr(bba, "ORPHAN_BRANDS")
+
+
+def test_orphan_live_when_attribution_installed(monkeypatch):
+    """If attributions maps the helper's bundle to an installed app, it's live."""
+    item = bba.BbaItem(
+        name="Foo Helper",
+        developer="Foo",
+        identifier="8.com.foo.helper",
+        plist_url="",
+        executable_path="",
+        disposition="",
+        associated_bundle_ids=["com.example.foo"],
+    )
+    # installed_apps contains the parent bundle id name
+    installed = {"com.example.foo.app", "other.app"}
+    assert bba._is_bba_orphan(item, installed) is False
+
+
+def test_orphan_live_when_exe_exists(monkeypatch, tmp_path):
+    exe = tmp_path / "bin"
+    exe.mkdir()
+    exe_file = exe / "helper"
+    exe_file.write_text("x")
+    item = bba.BbaItem(
+        name="H",
+        developer="",
+        identifier="8.com.h.helper",
+        plist_url="",
+        executable_path=str(exe_file),
+        disposition="",
+    )
+    assert bba._is_bba_orphan(item, set()) is False
+
+
+def test_orphan_flagged_when_exe_missing(monkeypatch, tmp_path):
+    item = bba.BbaItem(
+        name="Gone",
+        developer="",
+        identifier="8.com.gone.helper",
+        plist_url="",
+        executable_path=str(tmp_path / "missing" / "bin"),
+        disposition="",
+    )
+    assert bba._is_bba_orphan(item, set()) is True
+
+
+def test_find_bba_orphans_mechanical_no_brands(monkeypatch, tmp_path):
+    """find_bba_orphans is mechanical: file existence decides, not brand names.
+
+    Avast's exe/plist don't exist in the sandbox -> orphan even though we
+    DON'T hardcode Avast. An item whose exe exists -> not orphan.
+    """
+    # Point every item's exe at a sandbox path so no real /Library leaks in.
+    dump = SAMPLE_DUMPBTM
+    # Zoom gets a live executable in the sandbox -> NOT orphan.
+    zoom_exe = tmp_path / "us.zoom.ZoomDaemon"
+    zoom_exe.write_text("x")
+    # Avast exe -> sandbox path that does NOT exist -> orphan.
+    dump = dump.replace(
+        "Executable Path: /Library/PrivilegedHelperTools/us.zoom.ZoomDaemon",
+        f"Executable Path: {zoom_exe}",
+    )
+    dump = dump.replace(
+        "Executable Path: /Library/Application Support/AvastHUB/com.avast.hub.app/Contents/MacOS/com.avast.hub",
+        f"Executable Path: {tmp_path}/no-such-avast-hub",
+    )
+    monkeypatch.setattr(bba, "_run_sfltool_dumpbtm", lambda: dump)
+    monkeypatch.setattr(bba, "fetch_state", lambda it: "?")
+    monkeypatch.setattr(bba.inventory, "installed_app_names",
+                        lambda: {"hermes.app", "zoom.us.app"})
+    orphans = bba.find_bba_orphans()
+    labels = {o.label for o in orphans}
+    # Avast exe missing -> orphan (no brand map needed).
+    assert "com.avast.hub" in labels
+    assert "com.apple.weather.menu" in labels  # relative plist -> orphan
+    # Zoom exe exists -> not orphan.
+    assert "us.zoom.ZoomDaemon" not in labels
+
+
+
+def test_parse_field_line_uses_partition(stub_sfltool):
+    """A Key: value line is parsed via partition(':'), not a regex."""
+    line = "                 Identifier: 16.us.zoom.ZoomDaemon"
+    key, sep, val = bba._split_field_line(line)
+    assert sep == ":"
+    assert key == "Identifier"
+    assert val == "16.us.zoom.ZoomDaemon"
