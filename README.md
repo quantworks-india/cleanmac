@@ -77,8 +77,8 @@ cleanmac hidden show        # show hidden files
 | `cleanmac app orphans` | Shortcut for the above |
 | `cleanmac app orphans list` | Same as `cleanmac app orphans` |
 | `cleanmac app orphans purge` | Bootout + move orphaned plists to `~/Library/LaunchAgents-disabled` (dry-run; use `--commit` to act) |
-| `cleanmac app bba list` | Show Background App Activity items whose app/daemon is uninstalled (uses Apple `sfltool dumpbtm`) |
-| `cleanmac app bba purge` | Bootout + quarantine BAA orphans (dry-run; use `--commit` to act) |
+| `cleanmac app bba list` | **Alias** of `cleanmac app orphans list` — Background App Activity (Apple `sfltool dumpbtm`) |
+| `cleanmac app bba purge` | **Alias** of `cleanmac app orphans purge` |
 | `cleanmac app startup disable <label>` | Safely disable one (moves plist + launchctl bootout) |
 
 
@@ -90,6 +90,25 @@ Global flags (must appear before subcommand):
 | `--commit` | off | Actually delete. Without this, nothing is removed |
 | `--json` | off | Emit one structured JSON event per line on stdout (pipe to `jq`) |
 | `--verbose` | off | Print debug-level progress (file-by-file, scan counters) |
+
+### Data sources
+
+`cleanmac` prefers Apple's native, structured tooling over ad-hoc text parsing:
+
+| Capability | Source |
+|---|---|
+| Installed apps | `system_profiler SPApplicationsDataType -json` (cached per process) |
+| Background App Activity / orphans | `sfltool dumpbtm` + `launchctl print` |
+| Helper → parent app attribution | Apple's `attributions.plist` (via `plistlib`) |
+| Memory free bytes | `sysctl -n hw.pagesize` / `vm.page_free_count` / `vm.page_speculative_count` |
+| Network mount points | `getmntinfo(2)` via stdlib `ctypes` |
+| Launch plists / Info.plist | `plistlib` |
+| Finder hidden files | `defaults` + `killall Finder` |
+
+No regex on `backgrounditems.btm` or `mount(8)` text; no hand-rolled vendor
+"orphan brand" lists. Orphan detection is mechanical: an item is orphaned iff
+no installed app name/attribution matches **and** both its executable and plist
+are missing from disk.
 
 ### JSON output
 
