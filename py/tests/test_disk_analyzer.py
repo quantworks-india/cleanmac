@@ -90,7 +90,8 @@ def test_run_top_uses_dir_when_provided(tree, capsys):
     rc = da._run_top(args, Reporter())
     assert rc == 0
     out = capsys.readouterr().out
-    assert "disk_top" in out
+    assert "Size" in out  # table header
+    assert "Path" in out
 
 
 def test_run_summary_breaks_down_top_level(tree, capsys):
@@ -98,7 +99,8 @@ def test_run_summary_breaks_down_top_level(tree, capsys):
     rc = da._run_summary(args, Reporter())
     assert rc == 0
     out = capsys.readouterr().out
-    assert "disk_summary" in out
+    assert "Size" in out  # table header
+    assert "Path" in out
 
 
 def test_run_system_data_handles_missing_dirs(capsys, monkeypatch, tmp_path):

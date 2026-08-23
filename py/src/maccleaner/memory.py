@@ -94,9 +94,8 @@ def _run_heavy(reporter: Reporter) -> int:
         return 1
     procs = _parse_ps(r.stdout)
     procs.sort(key=lambda p: p.rss, reverse=True)
-    reporter.info("heavy_header", columns=["PID", "RSS", "COMMAND"])
-    for p in procs[:10]:
-        reporter.info("heavy_row", pid=p.pid, rss=size_human(p.rss), comm=p.comm)
+    rows = [[str(p.pid), size_human(p.rss), p.comm] for p in procs[:10]]
+    reporter.table("heavy", ["PID", "RSS", "COMMAND"], rows)
     if sys.stdin.isatty() and confirm("Quit a process by PID?"):
         try:
             pid_str = input("PID to kill: ").strip()

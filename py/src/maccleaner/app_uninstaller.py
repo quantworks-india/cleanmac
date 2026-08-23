@@ -14,6 +14,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from maccleaner import view
 from maccleaner.core import Deleter, Reporter, Sudo, dir_size_kb, is_safe_path
 
 APP_DIRS = ["/Applications", str(Path.home() / "Applications")]
@@ -737,18 +738,11 @@ def _pick_app_interactive(reporter: Reporter) -> str | None:
 def run(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
     if args.app_cmd == "list":
         apps = list_apps()
-        reporter.info(
-            "apps_list",
-            count=len(apps),
-            apps=[
-                {
-                    "name": a.name,
-                    "bundle_id": a.bundle_id,
-                    "size_kb": dir_size_kb(a.path),
-                }
-                for a in apps
-            ],
-        )
+        rows = [
+            [a.name, a.bundle_id or "", view.human_size(a.size_kb * 1024)]
+            for a in apps
+        ]
+        reporter.table("apps_list", ["Name", "Bundle ID", "Size"], rows)
         return 0
     if args.app_cmd == "remove":
         return _run_remove(args, deleter, sudo, reporter)

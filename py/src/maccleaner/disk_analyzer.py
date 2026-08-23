@@ -15,6 +15,7 @@ import stat
 import subprocess
 from pathlib import Path
 
+from maccleaner import view
 from maccleaner.core import Reporter
 
 NETWORK_MOUNT_TYPES = {"nfs", "smbfs", "afpfs", "webdav", "autofs", "cifs"}
@@ -177,11 +178,11 @@ def _run_top(args, reporter: Reporter) -> int:
     target = getattr(args, "dir", None) or str(Path.home())
     sizes, _ = scan(target)
     items = [(i, p, s) for i, (p, s) in enumerate(top_largest(sizes, 25), 1) if s != 0]
-    reporter.info(
-        "disk_top",
-        path=target,
-        items=[{"rank": i, "path": p, "size_bytes": s} for i, p, s in items],
-    )
+    rows = [
+        [str(i), view.human_size(s), p]
+        for i, p, s in items
+    ]
+    reporter.table("disk_top", ["#", "Size", "Path"], rows)
     return 0
 
 
@@ -194,15 +195,8 @@ def _run_summary(args, reporter: Reporter) -> int:
         key=lambda kv: kv[1],
         reverse=True,
     )
-    reporter.info(
-        "disk_summary",
-        path=target,
-        total_bytes=sum(s for _, s in top),
-        items=[
-            {"path": p, "name": os.path.basename(p) or p, "size_bytes": s}
-            for p, s in top
-        ],
-    )
+    rows = [[view.human_size(s), os.path.basename(p) or p] for p, s in top]
+    reporter.table("disk_summary", ["Size", "Path"], rows)
     return 0
 
 
@@ -220,8 +214,7 @@ def _run_system_data(args, reporter: Reporter) -> int:
         "pip cache": home / "Library/Caches/pip",
         "iOS backups": home / "Library/Application Support/MobileSync/Backup",
     }
-    items = []
-    total = 0
+    rows: list[list[str]] = []
     for label, p in targets.items():
         if not p.exists():
             continue
@@ -233,9 +226,8 @@ def _run_system_data(args, reporter: Reporter) -> int:
         except (OSError, ValueError, IndexError):
             kb = 0
         if kb > 0:
-            total += kb
-            items.append({"label": label, "path": str(p), "size_bytes": kb * 1024})
-    reporter.info("system_data", total_bytes=total * 1024, items=items)
+            rows.append([view.human_size(kb * 1024), label])
+    reporter.table("system_data", ["Size", "Label"], rows)
     return 0
 
 
