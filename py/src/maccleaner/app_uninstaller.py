@@ -190,33 +190,166 @@ def _scope_for_path(path: str) -> str:
         return "system"
     return "user"
 
+@dataclass
+class Orphan:
+    """One launch item that appears to belong to an uninstalled app."""
+    label: str
+    path: str
+    exe: str | None
+    scope: str  # "user" or "system"
 
-def _run_startup(args, sudo: Sudo, reporter: Reporter) -> int:
-    if args.action == "list":
-        return _startup_list(reporter)
-    if args.action == "disable":
-        return _startup_disable(args.label, sudo, reporter)
-    return 2
+
+# Brands whose apps frequently leave launchd residue after uninstall.
+# Triggered when no installed app matches the brand string.
+ORPHAN_BRANDS: dict[str, list[str]] = {
+    # Apps whose uninstallers commonly leave system LaunchDaemons behind.
+    "adobe": ["adobe", "armdc", "acrobat"],
+    "avast": ["avast"],
+    "box": ["box"],
+    "onedrive": ["onedrive", "syncreporter"],
+    "zoom": ["zoom"],
+    "nordvpn": ["nordvpn"],
+    "oracle": ["oracle", "java"],
+    "logitech": ["logitech"],
+}
 
 
-def _startup_list(reporter: Reporter) -> int:
+def get_installed_app_names() -> set[str]:
+    """Names of installed apps in /Applications and ~/Applications.
+
+    Only counts bundles with a Contents/Info.plist — empty stub directories
+    (e.g. partial uninstalls) are ignored so they don't shield orphaned
+    launchd entries from detection.
+    """
+    names: set[str] = set()
+    for base in [Path("/Applications"), Path.home() / "Applications"]:
+        if not base.is_dir():
+            continue
+        for p in base.glob("*.app"):
+            if (p / "Contents" / "Info.plist").is_file():
+                names.add(p.name.lower())
+    return names
+
+
+def _is_orphan(label: str, exe: str | None, installed_apps: set[str]) -> bool:
+    """Return True if this launch item appears to be from an uninstalled app.
+
+    Detection order (any one positive returns True):
+
+    1. Exe path references ``/Applications/X.app`` (system scope) and the
+       bundle is gone. Sandbox/user-scope paths like ``~/Applications`` are
+       resolved via ``installed_apps`` instead.
+    2. Label matches a known-bad-uninstaller brand (adobe/avast/box/onedrive)
+       AND no installed app contains that brand string.
+    3. Exe itself is missing on disk.
+    """
+    if not exe:
+        return False
+
+    # 1. System-scope `/Applications/X.app` reference.
+    # We anchor at the start of a path component, so ``/foo/Applications/X.app``
+    # does NOT match (a regex without anchors would).
+    if exe.startswith("/Applications/"):
+        first_seg = exe.split("/", 3)  # ["", "Applications", "X.app", ...]
+        if len(first_seg) >= 3 and first_seg[2].endswith(".app"):
+            app_path = f"/Applications/{first_seg[2]}"
+            if not os.path.exists(app_path):
+                return True
+
+    # 2. Brand-based detection
+    lower = label.lower()
+    for brand, triggers in ORPHAN_BRANDS.items():
+        if any(t in lower for t in triggers):
+            if not any(brand in a or any(t in a for t in triggers) for a in installed_apps):
+                return True
+
+    # 3. Executable itself is missing
+    if not os.path.exists(exe):
+        return True
+
+    return False
+
+
+def find_orphans() -> list[Orphan]:
+    """Walk all launch dirs and return orphaned items (from uninstalled apps).
+
+    Honors ``CLEANMAC_HOME`` so the user-scope directory is sandboxed in tests.
+    System-scope directories (``/Library/LaunchAgents``, ``/Library/LaunchDaemons``)
+    are always scanned on the real filesystem — they can't be relocated.
+    """
+    home = Path(os.environ.get("CLEANMAC_HOME", Path.home()))
     dirs = [
-        Path.home() / "Library/LaunchAgents",
+        home / "Library/LaunchAgents",
         Path("/Library/LaunchAgents"),
         Path("/Library/LaunchDaemons"),
     ]
-    reporter.info("startup_list_header", columns=["Label", "Scope", "State", "Path"])
+    installed = get_installed_app_names()
+    out: list[Orphan] = []
     for d in dirs:
         if not d.is_dir():
             continue
         for plist in sorted(d.glob("*.plist")):
             label = plist.stem
+            exe = None
             try:
                 with plist.open("rb") as f:
                     data = plistlib.load(f)
                 label = data.get("Label", label)
-            except (OSError, plistlib.InvalidFileException):
+                prog = data.get("Program")
+                args = data.get("ProgramArguments") or []
+                exe = str(prog or (args[0] if args else "")).strip() or None
+            except (OSError, plistlib.InvalidFileException, PermissionError):
                 pass
+
+            if _is_orphan(label, exe, installed):
+                out.append(
+                    Orphan(
+                        label=label,
+                        path=str(plist),
+                        exe=exe,
+                        scope=_scope_for_path(str(d)),
+                    )
+                )
+    return out
+
+
+def _run_startup(args, sudo: Sudo, reporter: Reporter) -> int:
+    if args.action == "list":
+        return _startup_list(reporter, orphans_only=getattr(args, "orphans_only", False))
+    if args.action == "disable":
+        return _startup_disable(args.label, sudo, reporter)
+    return 2
+
+
+def _startup_list(reporter: Reporter, orphans_only: bool = False) -> int:
+    """List every launch item, with a per-item orphan flag (or filter to orphans)."""
+    dirs = [
+        Path.home() / "Library/LaunchAgents",
+        Path("/Library/LaunchAgents"),
+        Path("/Library/LaunchDaemons"),
+    ]
+    installed_apps = get_installed_app_names()
+    header = "startup_orphans_header" if orphans_only else "startup_list_header"
+    reporter.info(header, columns=["Label", "Scope", "State", "Orphaned", "Path"])
+
+    shown = 0
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for plist in sorted(d.glob("*.plist")):
+            label = plist.stem
+            data = {}
+            exe = None
+            try:
+                with plist.open("rb") as f:
+                    data = plistlib.load(f)
+                label = data.get("Label", label)
+                prog = data.get("Program")
+                args = data.get("ProgramArguments") or []
+                exe = str(prog or (args[0] if args else "")).strip() or None
+            except (OSError, plistlib.InvalidFileException, PermissionError):
+                pass
+
             scope = _scope_for_path(str(d))
             state = "?"
             if scope == "user":
@@ -227,9 +360,24 @@ def _startup_list(reporter: Reporter) -> int:
                     check=False,
                 )
                 state = "running" if r.returncode == 0 else "stopped"
+
+            orphaned = _is_orphan(label, exe, installed_apps)
+
+            if orphans_only and not orphaned:
+                continue
+
             reporter.info(
-                "startup_item", label=label, scope=scope, state=state, path=str(plist)
+                "startup_item",
+                label=label,
+                scope=scope,
+                state=state,
+                orphaned=orphaned,
+                path=str(plist),
             )
+            shown += 1
+
+    if orphans_only:
+        reporter.info("startup_orphans_complete", count=shown)
     return 0
 
 
@@ -274,6 +422,193 @@ def _startup_disable(label: str, sudo: Sudo, reporter: Reporter) -> int:
     plist_path.rename(dest)
     reporter.info("moved_to_disabled", dest=str(dest))
     return 0
+
+
+def _orphans_purge(
+    orphans: list[Orphan],
+    deleter: Deleter,
+    sudo: Sudo,
+    reporter: Reporter,
+    yes: bool = False,
+) -> int:
+    """Disable (bootout) + remove orphaned launch items.
+
+    Each plist is moved into ~/Library/LaunchAgents-disabled/ so the action
+    is reversible. System-scope plists use sudo. Every action is audited.
+    """
+    if not orphans:
+        reporter.info("orphans_purge_empty")
+        return 0
+
+    # Honor CLEANMAC_HOME so tests can sandbox the quarantine dir.
+    target_root = Path(os.environ.get("CLEANMAC_HOME", Path.home()))
+    target = target_root / "Library/LaunchAgents-disabled"
+
+    if not deleter.commit:
+        # Dry-run: enumerate only. No bootout, no move.
+        reporter.info(
+            "orphans_purge_dryrun",
+            count=len(orphans),
+            items=[o.__dict__ for o in orphans],
+            target=str(target),
+        )
+        return 0
+
+    target.mkdir(parents=True, exist_ok=True)
+    reporter.info("orphans_purge_started", count=len(orphans), target=str(target))
+    purged = 0
+    for o in orphans:
+        plist = Path(o.path)
+        if not plist.exists():
+            reporter.warn("orphan_missing", label=o.label, path=o.path)
+            continue
+
+        # 1. Bootout first (idempotent — ok if not loaded)
+        if o.scope == "system":
+            r = sudo.run(["launchctl", "bootout", f"system/{o.label}"])
+            reporter.info(
+                "orphan_bootout_system",
+                label=o.label,
+                ok=r.returncode == 0,
+                stderr=r.stderr.strip() if r.returncode != 0 else None,
+            )
+        else:
+            r = subprocess.run(
+                ["launchctl", "bootout", f"gui/{os.getuid()}/{o.label}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            reporter.info(
+                "orphan_bootout_gui",
+                label=o.label,
+                ok=r.returncode == 0,
+                stderr=r.stderr.strip() if r.returncode != 0 else None,
+            )
+
+        # 2. Move plist to quarantine (reversible)
+        dest = target / plist.name
+        if dest.exists():
+            stem = dest.stem
+            i = 1
+            while dest.exists():
+                dest = target / f"{stem}-{i}.plist"
+                i += 1
+        try:
+            if o.scope == "system":
+                # root-owned plist — need sudo mv
+                r = sudo.run(["mv", str(plist), str(dest)])
+                if r.returncode != 0:
+                    reporter.error(
+                        "orphan_move_failed",
+                        label=o.label,
+                        stderr=r.stderr.strip(),
+                    )
+                    deleter.auditor.write(
+                        "orphan_purge", "failed", str(plist)
+                    )
+                    continue
+            else:
+                plist.rename(dest)
+            reporter.info("orphan_moved", label=o.label, dest=str(dest))
+            deleter.auditor.write(
+                "orphan_purge", "deleted", str(plist), 0
+            )
+            purged += 1
+        except OSError as e:
+            reporter.error("orphan_move_failed", label=o.label, error=str(e))
+            deleter.auditor.write("orphan_purge", "failed", str(plist))
+
+    reporter.info("orphans_purge_complete", purged=purged, total=len(orphans))
+    # Return 0 unless something failed — missing plists are not failures.
+    return 0
+
+
+def _run_orphans(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
+    """Dispatch for the `app orphans` subcommand."""
+    if args.orphans_action == "list":
+        return _startup_list(reporter, orphans_only=True)
+    if args.orphans_action == "purge":
+        orphans = find_orphans()
+        if not orphans:
+            reporter.info("orphans_none")
+            return 0
+        reporter.info(
+            "orphans_found",
+            count=len(orphans),
+            items=[o.__dict__ for o in orphans],
+        )
+        if args.yes:
+            # Skip interactive per-item confirm
+            deleter.confirm_fn = lambda _p: True
+        return _orphans_purge(orphans, deleter, sudo, reporter, yes=args.yes)
+    return 2
+
+
+def _run_bba(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
+    """Dispatch for the `app bba` subcommand (Background App Activity)."""
+    from maccleaner import bba as bba_mod
+
+    if args.bba_action == "list":
+        items = bba_mod.find_bba_orphans(include_state=True)
+        reporter.info(
+            "bba_orphans_header",
+            columns=["Label", "Scope", "State", "Name", "Developer", "BundleIds", "Plist"],
+        )
+        for it in items:
+            reporter.info(
+                "bba_orphan",
+                label=it.label,
+                scope=it.scope,
+                state=it.state or "?",
+                name=it.name,
+                developer=it.developer,
+                bundle_ids=",".join(it.associated_bundle_ids),
+                plist=it.plist_url or "",
+            )
+        reporter.info("bba_orphans_complete", count=len(items))
+        return 0
+
+    if args.bba_action == "purge":
+        items = bba_mod.find_bba_orphans(include_state=False)
+        if not items:
+            reporter.info("bba_orphans_none")
+            return 0
+
+        reporter.info(
+            "bba_orphans_found",
+            count=len(items),
+            items=[
+                {
+                    "label": it.label,
+                    "scope": it.scope,
+                    "plist": it.plist_url,
+                    "exe": it.executable_path,
+                    "developer": it.developer,
+                }
+                for it in items
+            ],
+        )
+        if not deleter.commit:
+            reporter.info("bba_purge_dryrun", count=len(items))
+            return 0
+
+        if args.yes:
+            deleter.confirm_fn = lambda _p: True
+
+        # Convert BbaItem -> Orphan so we reuse _orphans_purge
+        orphans = [
+            Orphan(
+                label=it.label,
+                path=it.plist_url,
+                exe=it.executable_path or None,
+                scope=it.scope if it.scope in ("system", "user") else "user",
+            )
+            for it in items
+            if it.plist_url
+        ]
+        return _orphans_purge(orphans, deleter, sudo, reporter, yes=args.yes)
+    return 2
 
 
 def _run_extensions(reporter: Reporter) -> int:
@@ -339,6 +674,10 @@ def run(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
         return 0
     if args.app_cmd == "startup":
         return _run_startup(args, sudo, reporter)
+    if args.app_cmd == "orphans":
+        return _run_orphans(args, deleter, sudo, reporter)
+    if args.app_cmd == "bba":
+        return _run_bba(args, deleter, sudo, reporter)
     if args.app_cmd == "extensions":
         return _run_extensions(reporter)
     if args.app_cmd == "update":

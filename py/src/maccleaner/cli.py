@@ -56,6 +56,17 @@ def _build_parser() -> argparse.ArgumentParser:
     st = app_sub.add_parser("startup", help="Manage startup programs")
     st.add_argument("action", choices=["list", "disable"])
     st.add_argument("label", nargs="?", help="LaunchAgent label to disable")
+    st.add_argument("--orphans-only", action="store_true", help="Show only orphaned items (agents from uninstalled apps)")
+    orp = app_sub.add_parser("orphans", help="List/purge orphaned background agents from uninstalled apps")
+    orp_sub = orp.add_subparsers(dest="orphans_action", required=True)
+    orp_sub.add_parser("list", help="List orphaned LaunchAgents/LaunchDaemons (dry)")
+    pp = orp_sub.add_parser("purge", help="Bootout + quarantine orphaned launch items")
+    pp.add_argument("--yes", action="store_true", help="Skip per-item confirmation (only used with --commit)")
+    bba = app_sub.add_parser("bba", help="Background App Activity: items sfltool dumpbtm reports as orphaned")
+    bba_sub = bba.add_subparsers(dest="bba_action", required=True)
+    bba_sub.add_parser("list", help="List BAA items whose app/daemon is uninstalled (dry)")
+    pb = bba_sub.add_parser("purge", help="Bootout + quarantine BAA orphans")
+    pb.add_argument("--yes", action="store_true", help="Skip per-item confirmation (only used with --commit)")
     app_sub.add_parser("extensions", help="List browser extensions")
     app_sub.add_parser("update", help="Check for outdated apps (mas/brew)")
 
@@ -106,6 +117,12 @@ def main(argv: list[str] | None = None) -> int:
     sudo = Sudo()
     reporter = Reporter(json_mode=args.json, verbose=args.verbose)
 
+    # Validate sudo once up front when committing. This means at most ONE
+    # password prompt for the entire invocation regardless of how many
+    # sub-commands end up touching /Library. The stamp lasts ~5 min by default.
+    if args.commit and _needs_sudo(args):
+        sudo.ensure()
+
     try:
         if args.tool == "app":
             return _run_app(args, deleter, sudo, reporter)
@@ -120,6 +137,20 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     finally:
         auditor.close()
+
+
+def _needs_sudo(args) -> bool:
+    """True if this invocation may touch system-scope paths (LaunchDaemons,
+    PrivilegedHelperTools, /Library state, etc.) — i.e. needs sudo at least
+    once during execution.
+    """
+    if args.tool == "mem":
+        return args.mem_cmd == "free"
+    if args.tool == "app":
+        # Any app command that may remove system-scope items.
+        if getattr(args, "app_cmd", None) in ("remove", "startup", "orphans", "bba"):
+            return True
+    return False
 
 
 def _run_app(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:

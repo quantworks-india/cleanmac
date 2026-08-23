@@ -72,6 +72,15 @@ cleanmac hidden show        # show hidden files
 | `cleanmac mem heavy` | List top CPU/RAM consumers |
 | `cleanmac hidden show` | Show hidden files in Finder |
 | `cleanmac hidden hide` | Hide hidden files in Finder |
+| `cleanmac app startup list` | List all LaunchAgents/LaunchDaemons with state |
+| `cleanmac app startup list --orphans-only` | **List only orphaned agents from apps you no longer have installed** |
+| `cleanmac app orphans` | Shortcut for the above |
+| `cleanmac app orphans list` | Same as `cleanmac app orphans` |
+| `cleanmac app orphans purge` | Bootout + move orphaned plists to `~/Library/LaunchAgents-disabled` (dry-run; use `--commit` to act) |
+| `cleanmac app bba list` | Show Background App Activity items whose app/daemon is uninstalled (uses Apple `sfltool dumpbtm`) |
+| `cleanmac app bba purge` | Bootout + quarantine BAA orphans (dry-run; use `--commit` to act) |
+| `cleanmac app startup disable <label>` | Safely disable one (moves plist + launchctl bootout) |
+
 
 Global flags (must appear before subcommand):
 

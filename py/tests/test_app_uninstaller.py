@@ -243,3 +243,245 @@ def test_find_app_by_bundle_id_case_insensitive(fake_home):
 def test_find_app_not_found_exits(fake_home):
     with pytest.raises(SystemExit):
         au._find_app("nonexistent.app")
+
+
+
+# ─── orphan detection + purge ───────────────────────────────────────
+
+@pytest.fixture
+def orphan_home(tmp_path, monkeypatch):
+    """Sandbox with a fake installed app and an orphaned launch agent.
+
+    Note: does NOT depend on `fake_home` — this fixture overrides
+    `CLEANMAC_HOME` and starts fresh.
+    """
+    home = tmp_path / "orphanhome"
+    lib = home / "Library"
+    # Idempotent create (tmp_path is fresh per test but defensive)
+    lib.mkdir(parents=True, exist_ok=True)
+    (lib / "LaunchAgents").mkdir(parents=True, exist_ok=True)
+    (home / "Applications").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("CLEANMAC_HOME", str(home))
+    monkeypatch.setattr(au, "APP_DIRS", [str(home / "Applications")])
+
+    # Installed app
+    (home / "Applications" / "RealApp.app" / "Contents").mkdir(parents=True)
+    with (home / "Applications" / "RealApp.app" / "Contents" / "Info.plist").open("wb") as f:
+        plistlib.dump({"CFBundleName": "RealApp"}, f)
+
+    # Live launch agent (matches installed app) — should NOT be flagged.
+    # The exe path MUST exist for _is_orphan to recognize this as a live item.
+    realapp_exe = home / "Applications" / "RealApp.app" / "Contents" / "MacOS" / "RealApp"
+    realapp_exe.parent.mkdir(parents=True, exist_ok=True)
+    realapp_exe.touch()
+    (lib / "LaunchAgents" / "com.example.realapp.plist").write_bytes(
+        plistlib.dumps({
+            "Label": "com.example.realapp",
+            "Program": str(realapp_exe),
+        })
+    )
+
+    # Orphan: app bundle missing
+    orphan_path = lib / "LaunchAgents" / "com.example.removed.plist"
+    orphan_path.write_bytes(
+        plistlib.dumps({
+            "Label": "com.example.removed",
+            "Program": str(home / "Applications" / "GhostApp.app" / "Contents" / "MacOS" / "GhostApp"),
+        })
+    )
+
+    return tmp_path, orphan_path
+
+
+def test_find_orphans_skips_live_agents(orphan_home):
+    _, _ = orphan_home
+    orphans = au.find_orphans()
+    labels = [o.label for o in orphans]
+    assert "com.example.removed" in labels
+    assert "com.example.realapp" not in labels
+
+
+def test_find_orphans_returns_orphan_dataclass(orphan_home):
+    _, orphan_path = orphan_home
+    orphans = au.find_orphans()
+    removed = next(o for o in orphans if o.label == "com.example.removed")
+    assert removed.path == str(orphan_path)
+    assert removed.scope == "user"
+    assert removed.exe and "GhostApp.app" in removed.exe
+
+
+def test_orphans_purge_dry_run_leaves_files(orphan_home):
+    """Without commit, _orphans_purge must NOT touch the plist or call launchctl.
+
+    Builds an Orphan directly to avoid scanning the real /Library on the host.
+    """
+    tmp_path, orphan_path = orphan_home
+    from subprocess import CompletedProcess
+
+    class TrackingSudo:
+        def __init__(self):
+            self.calls = []
+        def ensure(self):
+            return False
+        def run(self, args):
+            self.calls.append(list(args))
+            return CompletedProcess(args, 0, "", "")
+
+    sudo = TrackingSudo()
+    from maccleaner.core import Auditor, Deleter
+    aud = Auditor("orphan-dry", mode="dry-run")
+    d = Deleter(aud, commit=False)
+
+    # Inject Orphan directly — do NOT call find_orphans() in tests; the
+    # sandbox cannot redirect /Library/LaunchAgents which is real on macOS.
+    orphan = au.Orphan(
+        label="com.example.removed",
+        path=str(orphan_path),
+        exe=str(orphan_path.with_suffix("")),
+        scope="user",
+    )
+    rc = au._orphans_purge([orphan], d, sudo, Reporter())
+    assert rc == 0
+    assert orphan_path.exists(), "dry-run must not remove plist"
+    assert sudo.calls == [], f"dry-run must not invoke sudo, got: {sudo.calls}"
+    aud.close()
+
+
+def test_orphans_purge_commit_moves_plist_to_quarantine(orphan_home):
+    tmp_path, orphan_path = orphan_home
+    from subprocess import CompletedProcess
+
+    class TrackingSudo:
+        def ensure(self):
+            return False
+
+        def run(self, args):
+            # Simulate successful `mv` for user-scope items
+            if args and args[0] == "mv":
+                from pathlib import Path
+                import shutil
+                src = Path(args[1])
+                dst = Path(args[2])
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+                return CompletedProcess(args, 0, "", "")
+            return CompletedProcess(args, 0, "", "")
+
+    # Stub launchctl.bootout to be a no-op
+    import subprocess as real_subprocess
+    def fake_run(*args, **kwargs):
+        return real_subprocess.CompletedProcess(args, 0, "", "")
+    import maccleaner.app_uninstaller as au_mod
+    orig_run = au_mod.subprocess.run
+    au_mod.subprocess.run = fake_run
+    try:
+        from maccleaner.core import Auditor, Deleter
+        aud = Auditor("orphan-commit", mode="live")
+        d = Deleter(aud, commit=True)
+        d.confirm_fn = lambda _p: True  # auto-confirm
+
+        # Build Orphan directly from the sandbox fixture — avoids the real
+        # machine being scanned by find_orphans().
+        orphan = au.Orphan(
+            label="com.example.removed",
+            path=str(orphan_path),
+            exe=str(orphan_path.with_suffix("")),
+            scope="user",
+        )
+        rc = au._orphans_purge([orphan], d, TrackingSudo(), Reporter())
+        assert rc == 0
+        assert not orphan_path.exists(), "plist must be moved out"
+        # Verify quarantine copy exists
+        quarantine = tmp_path / "orphanhome" / "Library" / "LaunchAgents-disabled"
+        moved = list(quarantine.glob("com.example.removed*.plist"))
+        assert moved, "plist not in quarantine"
+        aud.close()
+    finally:
+        au_mod.subprocess.run = orig_run
+
+
+def test_orphans_purge_empty_returns_zero():
+    """No orphans -> 0 immediately, no I/O."""
+    from maccleaner.core import Auditor, Deleter
+    aud = Auditor("orphan-empty", mode="dry-run")
+    d = Deleter(aud, commit=False)
+    rc = au._orphans_purge([], d, None, Reporter())
+    assert rc == 0
+    aud.close()
+
+
+def test_orphans_purge_skips_missing_plist(orphan_home):
+    """If plist disappears between detection and purge, skip + warn."""
+    tmp_path, orphan_path = orphan_home
+    orphan_path.unlink()
+
+    from subprocess import CompletedProcess
+    class NoopSudo:
+        def ensure(self): return False
+        def run(self, args):
+            return CompletedProcess(args, 0, "", "")
+
+    from maccleaner.core import Auditor, Deleter
+    aud = Auditor("orphan-missing", mode="live")
+    d = Deleter(aud, commit=True)
+    d.confirm_fn = lambda _p: True
+
+    orphan = au.Orphan(
+        label="com.example.removed",
+        path=str(orphan_path),
+        exe=str(orphan_path.with_suffix("")),
+        scope="user",
+    )
+    rc = au._orphans_purge([orphan], d, NoopSudo(), Reporter())
+    assert rc == 0  # nothing to do, not an error
+    aud.close()
+
+
+def test_run_orphans_list_dispatches(orphan_home, monkeypatch):
+    tmp_path, _ = orphan_home
+    monkeypatch.setattr(au, "_startup_list", lambda r, orphans_only=False: 9)
+    args = type("A", (), {"orphans_action": "list"})()
+    from maccleaner.core import Auditor, Deleter
+    aud = Auditor("orphan-list", mode="dry-run")
+    d = Deleter(aud, commit=False)
+    rc = au._run_orphans(args, d, None, Reporter())
+    assert rc == 9
+    aud.close()
+
+
+def test_run_orphans_purge_dry_run_no_commit(orphan_home, monkeypatch):
+    """Without --commit, the dispatch path returns 0 without touching anything.
+
+    find_orphans is stubbed to avoid scanning the real /Library on macOS.
+    """
+    tmp_path, orphan_path = orphan_home
+    monkeypatch.setattr(
+        au,
+        "find_orphans",
+        lambda: [
+            au.Orphan(
+                label="com.example.removed",
+                path=str(orphan_path),
+                exe=str(orphan_path.with_suffix("")),
+                scope="user",
+            )
+        ],
+    )
+    from maccleaner.core import Auditor, Deleter
+    aud = Auditor("orphan-purge-dry", mode="dry-run")
+    d = Deleter(aud, commit=False)
+    args = type("A", (), {"orphans_action": "purge", "commit": False, "yes": False})()
+    rc = au._run_orphans(args, d, None, Reporter())
+    assert rc == 0
+    assert orphan_path.exists(), "dry-run must not touch plist"
+    aud.close()
+
+
+def test_run_orphans_purge_unknown_action_returns_2(orphan_home):
+    from maccleaner.core import Auditor, Deleter
+    aud = Auditor("orphan-unk", mode="dry-run")
+    d = Deleter(aud, commit=False)
+    args = type("A", (), {"orphans_action": "weird", "commit": False, "yes": False})()
+    rc = au._run_orphans(args, d, None, Reporter())
+    assert rc == 2
+    aud.close()
