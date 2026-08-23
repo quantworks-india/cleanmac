@@ -48,6 +48,7 @@ def run(args: Any, deleter: Deleter, sudo: Sudo | None, reporter: Reporter) -> i
     user = list(fp.get("leftovers", []))
     sys_paths = list(fp.get("system_paths", []))
     launch = list(fp.get("launch_paths", []))
+    bba_items = list(fp.get("bba", []))  # (label, plist_url)
 
     reporter.info(
         "uninstall_plan",
@@ -58,9 +59,12 @@ def run(args: Any, deleter: Deleter, sudo: Sudo | None, reporter: Reporter) -> i
         leftover_count=len(user),
         system_count=len(sys_paths),
         launch_count=len(launch),
+        bba_count=len(bba_items),
     )
     for p in user + sys_paths:
         reporter.info("uninstall_target", path=p)
+    for label, plist_url in bba_items:
+        reporter.info("uninstall_bba_target", label=label, plist=plist_url)
 
     # 3. One yes/no gate. This is the only confirmation.
     if not confirm_yes("Delete all of this?"):
@@ -75,10 +79,14 @@ def run(args: Any, deleter: Deleter, sudo: Sudo | None, reporter: Reporter) -> i
     deleter.delete("uninstall", sys_paths, sudo=sudo)
 
     # 4. Quarantine owned launch plists (never hard-delete).
-
     for label, path in zip(fp.get("launch_labels", []), launch):
         if path:
             au._quarantine_launch(label, path, deleter, sudo, reporter)
+
+    # 5. Quarantine BAA plists for the same bundle.
+    for label, plist_url in bba_items:
+        if plist_url:
+            au._quarantine_launch(label, plist_url, deleter, sudo, reporter)
 
     reporter.info("uninstall_complete", name=target.name)
     return 0

@@ -14,7 +14,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from maccleaner import view
+from maccleaner import bba, view
 from maccleaner.core import Deleter, Reporter, Sudo, dir_size_kb, is_safe_path
 
 APP_DIRS = ["/Applications", str(Path.home() / "Applications")]
@@ -295,7 +295,8 @@ def _build_fingerprint_for_target(target) -> dict:
 
     For a leftover-only target the bundle path is empty, so launch
     ownership is matched on bundle id alone; leftovers come from both the
-    display name and bundle id.
+    display name and bundle id. Includes BAA items whose associated
+    bundle id matches the target.
     """
     app = AppInfo(
         name=target.name,
@@ -306,6 +307,22 @@ def _build_fingerprint_for_target(target) -> dict:
     )
     fp = _build_fingerprint(app)
     fp["system_paths"] = _system_paths(app)
+
+    # BAA items associated with this target's bundle id (or name).
+    bundle = (target.bundle_id or "").lower()
+    name = target.name.lower()
+    bba_matches: list[tuple[str, str]] = []  # (label, plist_url)
+    try:
+        items = bba.list_all_bba_items()
+    except Exception:
+        items = []
+    for item in items:
+        assoc = {b.lower() for b in item.associated_bundle_ids}
+        if bundle and bundle in assoc:
+            bba_matches.append((item.label, item.plist_url))
+        elif name and any(name in b for b in assoc):
+            bba_matches.append((item.label, item.plist_url))
+    fp["bba"] = bba_matches
     return fp
 
 

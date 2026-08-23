@@ -92,6 +92,50 @@ def test_resolve_matches_app_basename(fake_app):
     assert target.app_installed is True
 
 
+def test_fingerprint_includes_bba_items(fake_app, monkeypatch):
+    """BAA items associated with the target bundle join the fingerprint."""
+    home, app = fake_app
+    monkeypatch.setattr(au.bba, "list_all_bba_items", lambda: [
+        au.bba.BbaItem(
+            name="MyDaemon",
+            developer="MyApp",
+            identifier="8.com.example.myapp.daemon",
+            plist_url="",
+            executable_path="",
+            disposition="enabled",
+            associated_bundle_ids=["com.example.myapp"],
+        )
+    ])
+    target = au.UninstallTarget(
+        name="MyApp", bundle_id="com.example.myapp",
+        path=str(home / "Applications" / "MyApp.app"), app_installed=True, query="MyApp",
+    )
+    fp = au._build_fingerprint_for_target(target)
+    assert "com.example.myapp.daemon" in [lbl for lbl, _ in fp["bba"]]
+
+
+def test_fingerprint_no_bba_when_none_match(fake_app, monkeypatch):
+    """BAA items for a different bundle are not included."""
+    home, app = fake_app
+    monkeypatch.setattr(au.bba, "list_all_bba_items", lambda: [
+        au.bba.BbaItem(
+            name="Other",
+            developer="Other",
+            identifier="8.com.other.daemon",
+            plist_url="",
+            executable_path="",
+            disposition="enabled",
+            associated_bundle_ids=["com.other"],
+        )
+    ])
+    target = au.UninstallTarget(
+        name="MyApp", bundle_id="com.example.myapp",
+        path="", app_installed=False, query="com.example.myapp",
+    )
+    fp = au._build_fingerprint_for_target(target)
+    assert fp["bba"] == []
+
+
 def test_run_uninstall_dry_run_lists_fingerprint(fake_app, monkeypatch, capsys):
     """Without --commit, _run_uninstall prints the fingerprint and touches nothing."""
     home, app = fake_app
