@@ -37,6 +37,38 @@ def test_brew_paths_uses_prefix_or_empty(tmp_path, monkeypatch, has_brew):
     assert any("Caskroom/myapp" in p for p in got)
 
 
+def test_brew_paths_never_returns_brew_roots(tmp_path, monkeypatch):
+    """An empty/None name or bundle id must not match the Caskroom/Cellar
+    roots themselves (bundle_id.split[-1] of '' is '', and os.path.join
+    collapses to the root — a whole-Homebrew deletion bug)."""
+    _fake_brew(tmp_path, monkeypatch, casks=["myapp"], cellars=["myapp"])
+    assert au.brew_paths("", "Chrome") == []
+    assert au.brew_paths("com.google.Chrome", "") == []
+    assert au.brew_paths("", "") == []
+
+
+def test_list_apps_includes_brew_cask_bundles(tmp_path, monkeypatch):
+    """Apps installed as brew casks (in Caskroom) appear in list_apps even
+    when their /Applications symlink is broken or absent."""
+    pfx = tmp_path / "brew"
+    ck = pfx / "Caskroom" / "google-chrome" / "1.0"
+    ck.mkdir(parents=True)
+    bundle = ck / "Google Chrome.app" / "Contents"
+    bundle.mkdir(parents=True)
+    (bundle / "Info.plist").write_bytes(
+        __import__("plistlib").dumps({
+            "CFBundleName": "Google Chrome",
+            "CFBundleIdentifier": "com.google.Chrome",
+        })
+    )
+    monkeypatch.setattr(au, "_brew_prefix", lambda: str(pfx))
+    # No /Applications symlink; Caskroom is the only source.
+    monkeypatch.setattr(au, "_candidate_dirs", lambda: [])
+    apps = au.list_apps()
+    assert any(a.name == "Google Chrome" for a in apps)
+    assert any("Caskroom" in a.path for a in apps)
+
+
 def test_brew_paths_matches_cask_and_cellar(tmp_path, monkeypatch):
     """Returns both the Caskroom app and the matching Cellar formula."""
     _fake_brew(tmp_path, monkeypatch, casks=["myapp", "other"], cellars=["myapp"])

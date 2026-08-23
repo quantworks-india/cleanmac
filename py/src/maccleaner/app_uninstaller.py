@@ -157,14 +157,39 @@ def _parse_info_plist(app_path: str) -> tuple[str | None, str | None]:
         return None, None
 
 
+def _caskroom_bundles(prefix: str) -> list[tuple[str, str]]:
+    """Find .app bundles inside a Homebrew Caskroom.
+
+    Cask bundles are nested: <prefix>/Caskroom/<cask>/<version>/<Name>.app.
+    Returns (path, name) pairs.
+    """
+    room = os.path.join(prefix, "Caskroom")
+    out: list[tuple[str, str]] = []
+    if not os.path.isdir(room):
+        return out
+    for cask in os.listdir(room):
+        base = os.path.join(room, cask)
+        if not os.path.isdir(base):
+            continue
+        for root, dirs, files in os.walk(base):
+            for d in dirs:
+                if d.endswith(".app"):
+                    out.append((os.path.join(root, d), d[:-4]))
+    return out
+
+
 def list_apps(*, include_size: bool = False) -> list[AppInfo]:
     apps: list[AppInfo] = []
+    seen: set[str] = set()
     for d in APP_DIRS:
         if not os.path.isdir(d):
             continue
         for entry in os.scandir(d):
             if not entry.name.endswith(".app") or not entry.is_dir():
                 continue
+            if entry.path in seen:
+                continue
+            seen.add(entry.path)
             name, bundle = _parse_info_plist(entry.path)
             apps.append(
                 AppInfo(
@@ -175,6 +200,22 @@ def list_apps(*, include_size: bool = False) -> list[AppInfo]:
                     size_kb=dir_size_kb(entry.path) if include_size else 0,
                 )
             )
+    # Brew casks may not have a live /Applications symlink.
+    prefix = _brew_prefix()
+    for path, _n in _caskroom_bundles(prefix):
+        if path in seen:
+            continue
+        seen.add(path)
+        name, bundle = _parse_info_plist(path)
+        apps.append(
+            AppInfo(
+                name=name or _n,
+                bundle_id=bundle,
+                path=path,
+                version=None,
+                size_kb=dir_size_kb(path) if include_size else 0,
+            )
+        )
     return sorted(apps, key=lambda a: a.name.lower())
 
 
@@ -276,7 +317,11 @@ def brew_paths(bundle_id: str, name: str) -> list[str]:
         d = os.path.join(prefix, sub)
         if not os.path.isdir(d):
             continue
-        for candidate in (name.lower(), basename, bundle_id.split(".")[-1].lower()):
+        candidates = {name.lower(), basename}
+        if bundle_id:
+            candidates.add(bundle_id.split(".")[-1].lower())
+        candidates.discard("")
+        for candidate in candidates:
             p = os.path.join(d, candidate)
             if os.path.isdir(p):
                 found.append(p)
