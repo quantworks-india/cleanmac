@@ -14,7 +14,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from maccleaner import bba, view
+from maccleaner import view
 from maccleaner.core import Deleter, Reporter, Sudo, dir_size_kb, is_safe_path
 
 APP_DIRS = ["/Applications", str(Path.home() / "Applications")]
@@ -238,6 +238,14 @@ def _system_paths(app: AppInfo) -> list[str]:
     return sorted(set(found))
 
 
+def _vendor_prefix(bundle_id: str) -> str:
+    """First two reverse-DNS labels, e.g. us.zoom.xos → 'us.zoom.'."""
+    parts = (bundle_id or "").lower().split(".")
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        return ""
+    return f"{parts[0]}.{parts[1]}."
+
+
 def _build_fingerprint(app: AppInfo, home: Path | None = None) -> dict:
     """Find every launch plist + leftover owned by ``app``.
 
@@ -276,6 +284,9 @@ def _build_fingerprint(app: AppInfo, home: Path | None = None) -> dict:
                 owned = True
             if exe and app_dir and exe.startswith(app_dir):
                 owned = True
+            prefix = _vendor_prefix(bundle)
+            if prefix and label.lower().startswith(prefix):
+                owned = True
             if owned:
                 launch_labels.append(label)
                 launch_paths.append(str(plist))
@@ -307,22 +318,9 @@ def _build_fingerprint_for_target(target) -> dict:
     )
     fp = _build_fingerprint(app)
     fp["system_paths"] = _system_paths(app)
-
-    # BAA items associated with this target's bundle id (or name).
-    bundle = (target.bundle_id or "").lower()
-    name = target.name.lower()
-    bba_matches: list[tuple[str, str]] = []  # (label, plist_url)
-    try:
-        items = bba.list_all_bba_items()
-    except Exception:
-        items = []
-    for item in items:
-        assoc = {b.lower() for b in item.associated_bundle_ids}
-        if bundle and bundle in assoc:
-            bba_matches.append((item.label, item.plist_url))
-        elif name and any(name in b for b in assoc):
-            bba_matches.append((item.label, item.plist_url))
-    fp["bba"] = bba_matches
+    # Do not call sfltool dumpbtm here. That tool shows a macOS
+    # authorization popup we cannot grant or dismiss from the CLI.
+    fp["bba"] = []
     return fp
 
 

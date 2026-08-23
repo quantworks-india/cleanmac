@@ -92,48 +92,44 @@ def test_resolve_matches_app_basename(fake_app):
     assert target.app_installed is True
 
 
-def test_fingerprint_includes_bba_items(fake_app, monkeypatch):
-    """BAA items associated with the target bundle join the fingerprint."""
-    home, app = fake_app
-    monkeypatch.setattr(au.bba, "list_all_bba_items", lambda: [
-        au.bba.BbaItem(
-            name="MyDaemon",
-            developer="MyApp",
-            identifier="8.com.example.myapp.daemon",
-            plist_url="",
-            executable_path="",
-            disposition="enabled",
-            associated_bundle_ids=["com.example.myapp"],
-        )
-    ])
-    target = au.UninstallTarget(
-        name="MyApp", bundle_id="com.example.myapp",
-        path=str(home / "Applications" / "MyApp.app"), app_installed=True, query="MyApp",
-    )
-    fp = au._build_fingerprint_for_target(target)
-    assert "com.example.myapp.daemon" in [lbl for lbl, _ in fp["bba"]]
+def test_fingerprint_does_not_call_sfltool(fake_app, monkeypatch):
+    """Uninstall must not run sfltool dumpbtm (that is the Mac auth popup)."""
+    import maccleaner.bba as bba_mod
 
+    def boom(*_a, **_k):
+        raise AssertionError("sfltool must not run during uninstall")
 
-def test_fingerprint_no_bba_when_none_match(fake_app, monkeypatch):
-    """BAA items for a different bundle are not included."""
-    home, app = fake_app
-    monkeypatch.setattr(au.bba, "list_all_bba_items", lambda: [
-        au.bba.BbaItem(
-            name="Other",
-            developer="Other",
-            identifier="8.com.other.daemon",
-            plist_url="",
-            executable_path="",
-            disposition="enabled",
-            associated_bundle_ids=["com.other"],
-        )
-    ])
+    monkeypatch.setattr(bba_mod, "list_all_bba_items", boom)
+    monkeypatch.setattr(bba_mod, "_run_sfltool_dumpbtm", boom)
     target = au.UninstallTarget(
-        name="MyApp", bundle_id="com.example.myapp",
-        path="", app_installed=False, query="com.example.myapp",
+        name="MyApp",
+        bundle_id="com.example.myapp",
+        path="",
+        app_installed=False,
+        query="com.example.myapp",
     )
     fp = au._build_fingerprint_for_target(target)
     assert fp["bba"] == []
+
+
+def test_fingerprint_owns_vendor_prefix_launch_daemon(fake_app):
+    """us.zoom.ZoomDaemon belongs to us.zoom.xos (same first two DNS labels)."""
+    home, _app = fake_app
+    daemon = home / "Library" / "LaunchAgents" / "us.zoom.ZoomDaemon.plist"
+    daemon.write_bytes(
+        __import__("plistlib").dumps(
+            {"Label": "us.zoom.ZoomDaemon", "Program": "/usr/bin/true"}
+        )
+    )
+    target = au.UninstallTarget(
+        name="zoom.us",
+        bundle_id="us.zoom.xos",
+        path="",
+        app_installed=False,
+        query="us.zoom.xos",
+    )
+    fp = au._build_fingerprint_for_target(target)
+    assert "us.zoom.ZoomDaemon" in fp["launch_labels"]
 
 
 def test_run_uninstall_dry_run_lists_fingerprint(fake_app, monkeypatch, capsys):
