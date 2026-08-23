@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -20,31 +19,33 @@ class Proc:
     comm: str
 
 
-def _parse_vm_stat(output: str) -> int:
-    page_size = 16384
-    free_pages = 0
-    for line in output.splitlines():
-        low = line.lower()
-        if "page size of" in low:
-            m = re.search(r"page size of (\d+) bytes", line)
-            if m:
-                page_size = int(m.group(1))
-        if low.startswith("pages free"):
-            m = re.search(r"pages free:\s+(\d+)", low)
-            if m:
-                free_pages += int(m.group(1))
-        if low.startswith("pages speculative"):
-            m = re.search(r"pages speculative:\s+(\d+)", low)
-            if m:
-                free_pages += int(m.group(1))
-    return free_pages * page_size
+def _sysctl_int(key: str) -> int:
+    """Read an integer sysctl via `sysctl -n`. Raises OSError on failure."""
+    r = subprocess.run(
+        ["sysctl", "-n", key], capture_output=True, text=True, check=False
+    )
+    if r.returncode != 0:
+        raise OSError(r.stderr.strip() or f"sysctl {key} failed")
+    return int(r.stdout.strip())
+
+
+def free_bytes() -> int:
+    """Free memory in bytes = (free + speculative pages) * page size.
+
+    Uses sysctl integers only — no vm_stat text parsing.
+    Returns 0 if sysctl is unavailable.
+    """
+    try:
+        page_size = _sysctl_int("hw.pagesize")
+        free_pages = _sysctl_int("vm.page_free_count")
+        speculative = _sysctl_int("vm.page_speculative_count")
+    except (OSError, ValueError):
+        return 0
+    return (free_pages + speculative) * page_size
 
 
 def _free_bytes() -> int:
-    r = subprocess.run(["vm_stat"], capture_output=True, text=True, check=False)
-    if r.returncode != 0:
-        return 0
-    return _parse_vm_stat(r.stdout)
+    return free_bytes()
 
 
 def _run_free(sudo: Sudo, reporter: Reporter) -> int:

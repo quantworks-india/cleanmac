@@ -112,3 +112,35 @@ def test_run_unknown_disk_cmd_returns_2():
     args = type("A", (), {"disk_cmd": "nonexistent"})()
     rc = da.run(args, Reporter())
     assert rc == 2
+
+
+# ── network mounts via getmntinfo (ctypes) ───────────────────────────
+
+def test_network_mount_points_from_getmntinfo(monkeypatch):
+    """_network_mount_points must come from getmntinfo, not mount(8) text."""
+    # Fake the low-level getmntinfo result: list of (fstype, mountpoint).
+    fake_mounts = [
+        ("apfs", "/"),
+        ("smbfs", "/Volumes/Share"),
+        ("autofs", "/System/Volumes/Data/home"),
+    ]
+    monkeypatch.setattr(da, "_getmntinfo_pairs", lambda: fake_mounts)
+
+    result = da._network_mount_points()
+    assert "/Volumes/Share" in result            # smbfs is network
+    assert "/System/Volumes/Data/home" in result # autofs is network
+    assert "/" not in result                     # apfs is local
+
+
+def test_network_mount_points_empty_on_getmntinfo_failure(monkeypatch):
+    monkeypatch.setattr(da, "_getmntinfo_pairs", lambda: (_ for _ in ()).throw(OSError("no")))
+    assert da._network_mount_points() == set()
+
+
+def test_getmntinfo_pairs_returns_structured_records(monkeypatch):
+    """The native path yields (fstype, mountpoint) tuples, not text."""
+    pairs = da._getmntinfo_pairs()
+    assert isinstance(pairs, list)
+    if pairs:
+        fs, mnt = pairs[0]
+        assert isinstance(fs, str) and isinstance(mnt, str)

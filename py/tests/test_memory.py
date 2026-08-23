@@ -9,16 +9,6 @@ import pytest
 from maccleaner import memory
 from maccleaner.core import Reporter
 
-VM_STAT_OUTPUT = """\
-Mach Virtual Memory Statistics: (page size of 16384 bytes)
-Pages free:                             100.
-Pages active:                           200.
-Pages inactive:                          50.
-Pages speculative:                       10.
-Pages wired down:                        30.
-Pages occupied by compressor:            40.
-"""
-
 PS_OUTPUT = """\
   PID   RSS COMMAND
     1  1234 /sbin/launchd
@@ -41,15 +31,57 @@ class FakeSudo:
         return CompletedProcess(args, 0, "", "")
 
 
-def test_parse_vm_stat_counts_free_and_speculative():
-    free = memory._parse_vm_stat(VM_STAT_OUTPUT)
-    assert free == (100 + 10) * 16384
+def test_free_bytes_sums_free_and_speculative_pages(monkeypatch):
+    """Free bytes = (free + speculative) * page_size, read via sysctl ints."""
+    monkeypatch.setattr(
+        memory,
+        "_sysctl_int",
+        lambda key: {
+            "hw.pagesize": 16384,
+            "vm.page_free_count": 100,
+            "vm.page_speculative_count": 10,
+        }[key],
+    )
+    assert memory.free_bytes() == (100 + 10) * 16384
 
 
-def test_parse_vm_stat_respects_page_size():
-    out = VM_STAT_OUTPUT.replace("16384", "4096")
-    free = memory._parse_vm_stat(out)
-    assert free == (100 + 10) * 4096
+def test_free_bytes_respects_page_size(monkeypatch):
+    monkeypatch.setattr(
+        memory,
+        "_sysctl_int",
+        lambda key: {
+            "hw.pagesize": 4096,
+            "vm.page_free_count": 100,
+            "vm.page_speculative_count": 10,
+        }[key],
+    )
+    assert memory.free_bytes() == (100 + 10) * 4096
+
+
+def test_free_bytes_queries_expected_sysctl_keys(monkeypatch):
+    seen: list[str] = []
+
+    def fake(key):
+        seen.append(key)
+        return 4096
+
+    monkeypatch.setattr(memory, "_sysctl_int", fake)
+    memory.free_bytes()
+    assert seen == ["hw.pagesize", "vm.page_free_count", "vm.page_speculative_count"]
+
+
+def test_free_bytes_defaults_on_sysctl_failure(monkeypatch):
+    def fail(key):
+        raise OSError("no sysctl")
+
+    monkeypatch.setattr(memory, "_sysctl_int", fail)
+    assert memory.free_bytes() == 0
+
+
+def test_parse_vm_stat_no_longer_exists(monkeypatch):
+    """The regex vm_stat parser is gone; module exposes free_bytes() instead."""
+    assert not hasattr(memory, "_parse_vm_stat")
+
 
 
 def test_parse_ps_skips_header_and_parses_fields():
@@ -92,12 +124,15 @@ def test_heavy_lists_processes(monkeypatch, capsys):
 def test_free_calls_sudo_and_shows_before_after(monkeypatch, capsys):
     calls: list[list[str]] = []
 
+    def fake_sysctl(key):
+        calls.append(["sysctl", "-n", key])
+        return {"hw.pagesize": 16384, "vm.page_free_count": 100, "vm.page_speculative_count": 10}[key]
+
     def fake_run(cmd, *args, **kw):
         calls.append(list(cmd))
-        if cmd[0] == "vm_stat":
-            return CompletedProcess(cmd, 0, VM_STAT_OUTPUT, "")
         return CompletedProcess(cmd, 0, "", "")
 
+    monkeypatch.setattr(memory, "_sysctl_int", fake_sysctl)
     monkeypatch.setattr(memory.subprocess, "run", fake_run)
 
     sudo = FakeSudo()
@@ -108,7 +143,7 @@ def test_free_calls_sudo_and_shows_before_after(monkeypatch, capsys):
     assert rc == 0
     assert sudo.ensured
     assert sudo.runs == [["purge"]]
-    assert ["vm_stat"] in calls
+    assert "sysctl" in str(calls)
     assert "before" in out
     assert "after" in out
 
@@ -228,12 +263,10 @@ def test_ps_failure_returns_1(monkeypatch, capsys):
 
 
 def test_purge_failure_returns_1(monkeypatch, capsys):
-    def fake_run(cmd, *args, **kw):
-        if cmd[0] == "vm_stat":
-            return CompletedProcess(cmd, 0, VM_STAT_OUTPUT, "")
-        return CompletedProcess(cmd, 1, "", "purge denied")
+    def fake_sysctl(key):
+        return {"hw.pagesize": 16384, "vm.page_free_count": 100, "vm.page_speculative_count": 10}[key]
 
-    monkeypatch.setattr(memory.subprocess, "run", fake_run)
+    monkeypatch.setattr(memory, "_sysctl_int", fake_sysctl)
 
     class FailingSudo:
         def ensure(self) -> bool:
@@ -247,9 +280,3 @@ def test_purge_failure_returns_1(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 1
     assert "purge denied" in out
-
-
-def test_parse_vm_stat_handles_no_page_size_line():
-    out = "Pages free: 100.\nPages speculative: 10.\n"
-    free = memory._parse_vm_stat(out)
-    assert free == (100 + 10) * 16384

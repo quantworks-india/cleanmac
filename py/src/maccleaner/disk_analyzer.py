@@ -7,6 +7,7 @@ Generates a self-contained HTML treemap report.
 
 from __future__ import annotations
 
+import ctypes
 import html
 import json
 import os
@@ -19,26 +20,63 @@ from maccleaner.core import Reporter
 NETWORK_MOUNT_TYPES = {"nfs", "smbfs", "afpfs", "webdav", "autofs", "cifs"}
 
 
+class _Statfs(ctypes.Structure):
+    """struct statfs (macOS/BSD). We only read the string fields."""
+
+    _fields_ = [
+        ("f_bsize", ctypes.c_uint32),
+        ("f_iosize", ctypes.c_int32),
+        ("f_blocks", ctypes.c_uint64),
+        ("f_bfree", ctypes.c_uint64),
+        ("f_bavail", ctypes.c_uint64),
+        ("f_files", ctypes.c_uint64),
+        ("f_ffree", ctypes.c_uint64),
+        ("f_fsid", ctypes.c_uint64),
+        ("f_owner", ctypes.c_uint32),
+        ("f_type", ctypes.c_uint32),
+        ("f_flags", ctypes.c_uint32),
+        ("f_fssubtype", ctypes.c_uint32),
+        ("f_fstypename", ctypes.c_char * 16),
+        ("f_mntonname", ctypes.c_char * 1024),
+        ("f_mntfromname", ctypes.c_char * 1024),
+        ("f_flags_ext", ctypes.c_uint32),
+        ("f_reserved", ctypes.c_uint32 * 7),
+    ]
+
+
+def _getmntinfo_pairs() -> list[tuple[str, str]]:
+    """Return [(fstype, mountpoint), ...] via the native getmntinfo(2) call.
+
+    Uses stdlib ``ctypes`` — no ``mount(8)`` text parsing. Raises OSError if
+    the syscall fails.
+    """
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.getmntinfo.argtypes = [ctypes.POINTER(ctypes.POINTER(_Statfs)), ctypes.c_int]
+    libc.getmntinfo.restype = ctypes.c_int
+
+    buf = ctypes.POINTER(_Statfs)()
+    count = libc.getmntinfo(ctypes.byref(buf), 2)  # MNT_NOWAIT
+    if count < 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+
+    pairs: list[tuple[str, str]] = []
+    for i in range(count):
+        mnt = buf[i]
+        fs = mnt.f_fstypename.decode(errors="ignore").strip("\x00")
+        pt = mnt.f_mntonname.decode(errors="ignore").strip("\x00")
+        if fs:
+            pairs.append((fs, pt))
+    return pairs
+
+
 def _network_mount_points() -> set[str]:
-    """Set of mount points on network filesystems (via mount(8))."""
-    mounts: set[str] = set()
+    """Set of mount points on network filesystems (via getmntinfo)."""
     try:
-        out = subprocess.run(
-            ["mount"], capture_output=True, text=True, check=False, timeout=5
-        )
-        for line in out.stdout.splitlines():
-            parts = line.split(" on ")
-            if len(parts) < 2:
-                continue
-            fstype = (
-                parts[0].split(",")[-1] if "," in parts[0] else parts[0].split()[-1]
-            )
-            if any(t in fstype for t in NETWORK_MOUNT_TYPES):
-                mp = parts[1].split(" (")[0].strip()
-                mounts.add(mp)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    return mounts
+        mounts = _getmntinfo_pairs()
+    except (OSError, AttributeError, ctypes.ArgumentError):
+        return set()
+    return {pt for fs, pt in mounts if fs in NETWORK_MOUNT_TYPES}
 
 
 def _walk(root: str) -> list[dict]:
