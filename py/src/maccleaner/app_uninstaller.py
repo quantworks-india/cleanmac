@@ -290,6 +290,54 @@ def _build_fingerprint(app: AppInfo, home: Path | None = None) -> dict:
     }
 
 
+def _build_fingerprint_for_target(target) -> dict:
+    """Fingerprint from an ``UninstallTarget`` (live app or leftover-only).
+
+    For a leftover-only target the bundle path is empty, so launch
+    ownership is matched on bundle id alone; leftovers come from both the
+    display name and bundle id.
+    """
+    app = AppInfo(
+        name=target.name,
+        bundle_id=target.bundle_id,
+        path=target.path,
+        version=None,
+        size_kb=0,
+    )
+    fp = _build_fingerprint(app)
+    fp["system_paths"] = _system_paths(app)
+    return fp
+
+
+def _quarantine_launch(label, path, deleter, sudo, reporter) -> None:
+    """Bootout + move a launch plist to quarantine (never hard-delete).
+
+    Falls back to a plain move if launchctl bootout fails or is unavailable.
+    """
+    import shutil
+
+    home = Path(os.environ.get("CLEANMAC_HOME", Path.home()))
+    quarantine = home / "Library" / "LaunchAgents-disabled"
+    quarantine.mkdir(parents=True, exist_ok=True)
+    dest = quarantine / os.path.basename(path)
+    if deleter.commit:
+        try:
+            scope = "system" if "LaunchDaemons" in path or "/Library/LaunchAgents" in path else "user"
+            target_label = label
+            if scope == "system" and sudo:
+                sudo.run(["launchctl", "bootout", f"system/{target_label}"])
+            else:
+                import subprocess
+                subprocess.run(["launchctl", "bootout", f"gui/501/{target_label}"],
+                               capture_output=True)
+        except Exception:
+            pass
+        shutil.move(path, str(dest))
+        reporter.info("launch_quarantined", label=label, to=str(dest))
+    else:
+        reporter.info("launch_would_quarantine", label=label, to=str(dest))
+
+
 def _run_remove(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
     app = _find_app(args.app, force=args.force)
     reporter.info(
