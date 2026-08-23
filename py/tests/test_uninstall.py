@@ -91,3 +91,20 @@ def test_run_uninstall_dry_run_shows_dryrun_banner(fake_app, monkeypatch, capsys
     out = capsys.readouterr().out
     assert "dry-run" in out.lower()
     aud.close()
+
+
+def test_purge_by_id_dry_run_lists_leftovers(monkeypatch, fake_app, capsys):
+    """purge-by-id lists the leftover paths and touches nothing without --commit."""
+    home, _app = fake_app
+    fake_leftovers = [str(home / "Library" / "Application Support" / "MyApp")]
+    monkeypatch.setattr(au, "_leftover_paths_for_bundle", lambda b: fake_leftovers)
+    monkeypatch.setattr(au, "spotlight_orphan_paths", lambda b: [])
+    from maccleaner.core import Auditor, Deleter
+    aud = Auditor("purge-by-id-dry", mode="dry-run")
+    d = Deleter(aud, commit=False)
+    args = type("A", (), {"bundle": "com.example.myapp", "yes": False})()
+    rc = au._run_purge_by_id(args, d, None, Reporter())
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "com.example.myapp" in out
+    aud.close()

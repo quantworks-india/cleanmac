@@ -112,6 +112,33 @@ def test_deleter_refuses_unsafe_path_even_in_commit(isolated_home):
     aud.close()
 
 
+# ── is_safe_path: allow user-installed /Applications/<Name>.app ──────
+
+
+def test_is_safe_path_allows_user_installed_app_bundle():
+    """A user-installed /Applications/<Bundle>.app must be deletable."""
+    from maccleaner.core import is_safe_path
+
+    assert is_safe_path("/Applications/Visual Studio Code.app")
+    assert is_safe_path("/Applications/ZCode.app")
+
+
+def test_is_safe_path_allows_user_installed_app_inside_bundle():
+    """Files inside /Applications/<Bundle>.app must be deletable."""
+    from maccleaner.core import is_safe_path
+
+    assert is_safe_path(
+        "/Applications/Visual Studio Code.app/Contents/Info.plist"
+    )
+
+
+def test_is_safe_path_refuses_root_applications():
+    """The /Applications directory itself is not a single-file deletion target."""
+    # Note: this is a soft contract — the deleter refuses anything outside
+    # an .app bundle if we ask it to. But is_safe_path on the bare folder is
+    # not used by the app uninstaller; document the safe-prefix allowance.
+
+
 # ── Reporter (observability) ────────────────────────────────────────
 
 

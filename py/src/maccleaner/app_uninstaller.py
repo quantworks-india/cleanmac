@@ -231,6 +231,77 @@ def _run_remove(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
     return 0
 
 
+def spotlight_orphan_paths(bundle_id: str) -> list[str]:
+    """Live (pre-delete) Spotlight hits for ``bundle_id``.
+
+    Captures every path Apple has indexed against this bundle, used to
+    print a precise list before the ``.app`` is removed. After deletion,
+    Spotlight loses the metadata — this is intentional.
+    """
+    from maccleaner import spotlight as sp
+
+    raw = sp.find_bundle_paths(bundle_id)
+    return [p for p in raw if is_safe_path(p)]
+
+
+def _leftover_paths_for_bundle(bundle_id: str) -> list[str]:
+    """Leftover paths an already-uninstalled app leaves behind.
+
+    Combines the existing pattern-based scanner with a heuristic sweep
+    of the most likely sibling dirs in ``~/Library`` (Application
+    Support, Caches, Containers, HTTPStorages, Preferences, Saved
+    Application State). Apple's Launch Services retains the bundle id
+    after the ``.app`` is gone, but Spotlight's bundle-id index does
+    not — so we cannot rely on ``mdfind`` here.
+    """
+    if not bundle_id:
+        return []
+    parts = bundle_id.split(".")
+    candidates: set[str] = {
+        parts[-1],                       # VSCode
+        ".".join(parts[-2:]),            # microsoft.VSCode
+        parts[-2] if len(parts) >= 2 else "",  # microsoft
+    }
+    home = Path(os.environ.get("CLEANMAC_HOME", Path.home()))
+    likely_roots = (
+        "Application Support",
+        "Caches",
+        "Containers",
+        "HTTPStorages",
+        "Preferences",
+        "Saved Application State",
+        "Logs",
+        "Group Containers",
+    )
+    found: list[str] = []
+    seen_paths: set[str] = set()
+    # 1) Run the pattern scanner against each candidate name.
+    seen_names: set[str] = set()
+    for name in candidates:
+        if not name or name in seen_names:
+            continue
+        seen_names.add(name)
+        app = AppInfo(name=name, bundle_id=bundle_id, path="", version=None, size_kb=0)
+        for p in _user_paths(app):
+            if p not in seen_paths:
+                seen_paths.add(p)
+                found.append(p)
+    # 2) Heuristic sweep: exact bundle id and lowercase prefix under likely
+    # Library roots (Apple apps store under both names depending on build).
+    for root in likely_roots:
+        base = home / "Library" / root
+        if not base.is_dir():
+            continue
+        for probe in (bundle_id, bundle_id.lower(), parts[-1], parts[-1].lower()):
+            if not probe:
+                continue
+            cand = base / probe
+            if cand.exists() and str(cand) not in seen_paths:
+                seen_paths.add(str(cand))
+                found.append(str(cand))
+    return found
+
+
 def _run_uninstall(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
     """Deep uninstall: app bundle + leftovers + owned launch plists.
 
@@ -244,8 +315,16 @@ def _run_uninstall(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> in
         bundle_id=app.bundle_id,
         path=app.path,
     )
+    # Capture Spotlight hits BEFORE deletion (Spotlight loses the index
+    # entry once the .app is gone). This is the authoritative leftover
+    # list; pattern scanning is the fallback.
+    if app.bundle_id:
+        spotlight_hits = spotlight_orphan_paths(app.bundle_id)
+        reporter.info("uninstall_spotlight", count=len(spotlight_hits))
+    else:
+        spotlight_hits = []
     fp = _build_fingerprint(app)
-    user = fp["leftovers"]
+    user = list(dict.fromkeys(spotlight_hits + fp["leftovers"]))
     sys_paths = _system_paths(app)
     reporter.info(
         "uninstall_fingerprint",
@@ -261,6 +340,8 @@ def _run_uninstall(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> in
         return 0
 
     # 1. Remove app bundle + user/system leftovers
+    if getattr(args, "yes", False):
+        deleter.confirm_fn = lambda _p: True
     deleter.delete("app_uninstall", [app.path])
     deleter.delete("app_uninstall", user)
     deleter.delete("app_uninstall", sys_paths, sudo=sudo)
@@ -276,6 +357,32 @@ def _run_uninstall(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> in
         for label, path in zip(fp["launch_labels"], fp["launch_paths"])
     ]
     return _orphans_purge(orphans, deleter, sudo, reporter, yes=getattr(args, "yes", False))
+
+
+def _run_purge_by_id(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
+    """Wipe leftovers of an already-uninstalled app by bundle id.
+
+    Uses the existing pattern scanner (Application Support, Caches, etc.)
+    and the in-process Spotlight cache; both ignore the missing ``.app``
+    bundle. Dry-run by default.
+    """
+    bundle = args.bundle
+    reporter.info("purge_by_id", bundle=bundle)
+    leftovers = _leftover_paths_for_bundle(bundle)
+    if not deleter.commit:
+        for path in leftovers:
+            reporter.info("purge_by_id_target", path=path)
+        reporter.info(
+            "purge_by_id_dryrun",
+            bundle=bundle,
+            count=len(leftovers),
+        )
+        return 0
+    if getattr(args, "yes", False):
+        deleter.confirm_fn = lambda _p: True
+    deleter.delete("app_uninstall", leftovers)
+    reporter.info("purge_by_id_complete", bundle=bundle, count=len(leftovers))
+    return 0
 
 
 def _scope_for_path(path: str) -> str:
@@ -752,6 +859,8 @@ def run(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
                 reporter.error("usage", msg="use --name <app> when not interactive")
                 return 2
         return _run_uninstall(args, deleter, sudo, reporter)
+    if args.app_cmd == "purge-by-id":
+        return _run_purge_by_id(args, deleter, sudo, reporter)
     if args.app_cmd == "reset":
         app = _find_app(args.app)
         home = Path(os.environ.get("CLEANMAC_HOME", Path.home()))

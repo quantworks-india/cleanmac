@@ -229,19 +229,43 @@ def _home_real() -> str:
 
 
 def is_safe_path(path: str) -> bool:
-    """True if a path is deletable. realpath resolution + whitelist prefix."""
+    """True if a path is deletable. realpath resolution + whitelist prefix.
+
+    Order matters: home prefix wins first (so ~/Library/* is deletable
+    unless it is one of the protected home subdirs like .ssh), then
+    /Applications/<Bundle>.app, then top-level allow-list. The bare
+    /Applications directory is never deletable; protected home
+    subdirs (.ssh, .aws, .gnupg, .config, .Trash) are not deletable.
+    """
     real = os.path.realpath(path)
-    if _is_protected(real):
-        return False
     home_real = _home_real()
-    for prefix in (
-        home_real,
-        os.path.realpath("/Volumes"),
-        os.path.realpath("/Applications"),
-        "/tmp",
-    ):
-        if real == prefix or real.startswith(prefix + os.sep):
+    apps_real = os.path.realpath("/Applications")
+
+    # macOS temp sandbox lives under /private — allow before any check.
+    for safe in ("/private/var/folders", "/private/tmp", "/private/var/tmp"):
+        if real == safe or real.startswith(safe + os.sep):
             return True
+
+    # Top-level allow-list (home, /Applications/<Bundle>.app, /Volumes, /tmp).
+    if real == apps_real:
+        return False
+    if real.startswith(apps_real + os.sep):
+        first = real[len(apps_real) + 1 :]
+        if "/" in first:
+            return True
+        return first.endswith(".app")
+    for prefix in (home_real, os.path.realpath("/Volumes"), "/tmp"):
+        if real == prefix or real.startswith(prefix + os.sep):
+            # Within home: refuse protected subdirs.
+            if prefix == home_real:
+                for sub in (".ssh", ".aws", ".gnupg", ".config", ".Trash"):
+                    if real == home_real + "/" + sub or real.startswith(
+                        home_real + "/" + sub + "/"
+                    ):
+                        return False
+            return True
+
+    # Default deny.
     return False
 
 
