@@ -84,7 +84,7 @@ def run(args: Any, deleter: Deleter, sudo: Sudo | None, reporter: Reporter) -> i
         reporter.warn("uninstall_aborted")
         return 0
 
-    needs_root = any(
+    needs_root = bool(helpers) or any(
         au._is_system_launch(p)
         for p in launch + sys_paths + [plist for _lbl, plist in bba_items if plist]
     )
@@ -98,6 +98,8 @@ def run(args: Any, deleter: Deleter, sudo: Sudo | None, reporter: Reporter) -> i
         deleter.delete("uninstall", [target.path])
     deleter.delete("uninstall", user)
     deleter.delete("uninstall", sys_paths, sudo=sudo)
+    deleter.delete("uninstall", brew)
+    deleter.delete("uninstall", helpers, sudo=sudo)
 
     # 4. Quarantine owned launch plists (never hard-delete).
     for label, path in zip(fp.get("launch_labels", []), launch):

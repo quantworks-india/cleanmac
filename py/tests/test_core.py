@@ -147,6 +147,14 @@ def test_is_safe_path_allows_user_installed_app_inside_bundle():
     )
 
 
+def test_is_safe_path_allows_privileged_helper_when_sudo():
+    """Helper executables under /Library/PrivilegedHelperTools are deletable."""
+    from maccleaner.core import is_safe_path
+
+    assert is_safe_path("/Library/PrivilegedHelperTools/us.zoom.ZoomDaemon")
+    assert is_safe_path("/Library/PrivilegedHelperTools/com.example.helper")
+
+
 def test_is_safe_path_refuses_root_applications():
     """The /Applications directory itself is not a single-file deletion target."""
     # Note: this is a soft contract — the deleter refuses anything outside

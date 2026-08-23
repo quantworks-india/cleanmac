@@ -265,6 +265,12 @@ def is_safe_path(path: str) -> bool:
                         return False
             return True
 
+    # Privileged helper executables are deletable (requires sudo to remove).
+    # /Library itself stays protected; only this subdirectory is allowed.
+    helpers_root = "/Library/PrivilegedHelperTools"
+    if real.startswith(helpers_root + os.sep):
+        return True
+
     # Default deny.
     return False
 
