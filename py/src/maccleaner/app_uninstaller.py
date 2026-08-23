@@ -646,27 +646,91 @@ def _run_update(reporter: Reporter) -> int:
     return 0
 
 
+def _parse_key(data: bytes) -> str:
+    """Map a raw terminal byte sequence to a semantic key.
+
+    Supports arrow keys (ESC [ A/B/C/D), Enter (\r or \n), and cancel
+    (q, ESC, Ctrl-C). Plain printable bytes map to themselves.
+    """
+    if data in (b"\x1b[A", b"\x1bOA"):
+        return "up"
+    if data in (b"\x1b[B", b"\x1bOB"):
+        return "down"
+    if data in (b"\x1b[C", b"\x1bOC"):
+        return "right"
+    if data in (b"\x1b[D", b"\x1bOD"):
+        return "left"
+    if data in (b"\r", b"\n"):
+        return "enter"
+    if data in (b"\x1b", b"q", b"Q", b"\x03"):
+        return "cancel"
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+
+
+def _move_cursor(idx: int, key: str, total: int) -> int:
+    """Move the selection index up/down, clamped to [0, total)."""
+    if key == "down":
+        return min(idx + 1, total - 1)
+    if key == "up":
+        return max(idx - 1, 0)
+    return idx
+
+
 def _pick_app_interactive(reporter: Reporter) -> str | None:
-    """Show a numbered list of apps; return the chosen name (or None)."""
+    """Show an arrow-key navigable list of apps; return the chosen name.
+
+    Up/Down to move, Enter to select, q / Esc / Ctrl-C to cancel. Uses only
+    stdlib termios/tty/ANSI escapes — no third-party dependency.
+    """
     apps = list_apps()
     if not apps:
         reporter.warn("no_apps_installed")
         return None
-    reporter.info("uninstall_picker_header", columns=["#", "Name", "Bundle ID", "Size"])
-    for i, a in enumerate(apps, 1):
-        reporter.info("uninstall_picker_row", index=i, name=a.name, bundle_id=a.bundle_id or "", size_kb=a.size_kb)
+
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
     try:
-        raw = input("Select app number (or 0 to cancel): ").strip()
-    except EOFError:
-        return None
-    if not raw.isdigit():
-        reporter.warn("uninstall_invalid_choice", value=raw)
-        return None
-    idx = int(raw)
-    if idx < 1 or idx > len(apps):
-        reporter.warn("uninstall_invalid_choice", value=raw)
-        return None
-    return apps[idx - 1].name
+        tty.setraw(fd)
+        idx = 0
+        while True:
+            # Redraw the list from the current cursor position.
+            rows = []
+            for i, a in enumerate(apps):
+                marker = "▸" if i == idx else " "
+                rows.append(f" {marker} {a.name}  {a.bundle_id or ''}")
+            block = "\x1b[?25l" + "\n".join(rows) + "\x1b[0m"
+            sys.stdout.write("\x1b[H\x1b[J" + block + "\n")
+            sys.stdout.flush()
+
+            chunk = os.read(fd, 1)
+            if chunk == b"\x1b":
+                # read the rest of an escape sequence
+                more = os.read(fd, 2)
+                key = _parse_key(chunk + more)
+            else:
+                key = _parse_key(chunk)
+
+            if key == "down":
+                idx = _move_cursor(idx, "down", len(apps))
+            elif key == "up":
+                idx = _move_cursor(idx, "up", len(apps))
+            elif key == "enter":
+                chosen = apps[idx].name
+                sys.stdout.write("\x1b[K" + "\x1b[0m" + f"\nSelected: {chosen}\n")
+                sys.stdout.flush()
+                return chosen
+            elif key == "cancel":
+                sys.stdout.write("\x1b[0m\n")
+                sys.stdout.flush()
+                return None
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
 def run(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
