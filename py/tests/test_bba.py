@@ -191,6 +191,19 @@ def test_run_sfltool_failure_raises(monkeypatch):
         bba._run_sfltool_dumpbtm()
 
 
+def test_run_sfltool_timeout_raises(monkeypatch):
+    """A hung sfltool must surface a timeout error, not hang forever."""
+    import subprocess as sp
+
+    def fake_run(*a, **kw):
+        raise sp.TimeoutExpired("sfltool", 30)
+
+    monkeypatch.setattr(bba.shutil, "which", lambda _name: "/usr/bin/sfltool")
+    monkeypatch.setattr(bba.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="timed out"):
+        bba._run_sfltool_dumpbtm(timeout=1)
+
+
 # ── Task 5: line-state parser, no regex ─────────────────────────────
 
 def test_bba_module_does_not_import_re():

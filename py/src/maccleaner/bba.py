@@ -50,17 +50,25 @@ class BbaItem:
         return "unknown"
 
 
-def _run_sfltool_dumpbtm() -> str:
-    """Call Apple's sfltool dumpbtm. Returns its plain-text dump."""
+def _run_sfltool_dumpbtm(timeout: float = 30.0) -> str:
+    """Call Apple's sfltool dumpbtm. Returns its plain-text dump.
+
+    A short timeout prevents a hung BackgroundTaskManagement daemon from
+    stalling the whole command.
+    """
     sfltool = shutil.which("sfltool")
     if not sfltool:
         raise RuntimeError("sfltool not found on PATH (macOS only)")
-    r = subprocess.run(
-        [sfltool, "dumpbtm"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        r = subprocess.run(
+            [sfltool, "dumpbtm"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("sfltool dumpbtm timed out (BTM daemon unresponsive)")
     if r.returncode != 0:
         raise RuntimeError(f"sfltool dumpbtm failed: {r.stderr.strip()}")
     return r.stdout
@@ -192,12 +200,16 @@ def fetch_state(item: BbaItem) -> str:
         return "unknown"
     domain = "system" if item.scope == "system" else f"gui/{item.uid or 0}"
     target = f"{domain}/{label}"
-    r = subprocess.run(
-        ["launchctl", "print", target],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        r = subprocess.run(
+            ["launchctl", "print", target],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        return "timed out"
     if r.returncode != 0:
         return "not registered"
     # Parse "state = ..." line via startswith/partition (no regex).

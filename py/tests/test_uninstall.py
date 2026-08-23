@@ -73,3 +73,21 @@ def test_run_uninstall_dry_run_lists_fingerprint(fake_app, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "com.example.myapp" in out or "uninstall" in out
     aud.close()
+
+
+def test_run_uninstall_dry_run_shows_dryrun_banner(fake_app, monkeypatch, capsys):
+    """Human dry-run prints the dry-run banner, not a raw debug dump."""
+    home, app = fake_app
+    monkeypatch.setattr(au, "_find_app", lambda name, force=False: app)
+    monkeypatch.setattr(au, "_build_fingerprint",
+                        lambda app, home=None: {"launch_labels": ["com.example.myapp"],
+                                                "launch_paths": [],
+                                                "leftovers": []})
+    from maccleaner.core import Auditor, Deleter
+    aud = Auditor("uninstall-dry2", mode="dry-run")
+    d = Deleter(aud, commit=False)
+    args = type("A", (), {"name": "myapp", "yes": False, "commit": False, "force": False})()
+    au._run_uninstall(args, d, None, Reporter())
+    out = capsys.readouterr().out
+    assert "dry-run" in out.lower()
+    aud.close()

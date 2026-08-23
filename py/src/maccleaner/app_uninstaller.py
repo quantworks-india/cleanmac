@@ -256,6 +256,7 @@ def _run_uninstall(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> in
 
     if not deleter.commit:
         reporter.info("uninstall_dryrun", app=app.name, count=len(fp["launch_labels"]))
+        reporter.dryrun()
         return 0
 
     # 1. Remove app bundle + user/system leftovers
@@ -321,8 +322,7 @@ def _startup_list(reporter: Reporter, orphans_only: bool = False) -> int:
         Path("/Library/LaunchDaemons"),
     ]
     installed_apps = inventory.installed_app_names()
-    header = "startup_orphans_header" if orphans_only else "startup_list_header"
-    reporter.info(header, columns=["Label", "Scope", "State", "Orphaned", "Path"])
+    rows: list[list[str]] = []
 
     shown = 0
     for d in dirs:
@@ -358,16 +358,15 @@ def _startup_list(reporter: Reporter, orphans_only: bool = False) -> int:
             if orphans_only and not orphaned:
                 continue
 
-            reporter.info(
-                "startup_item",
-                label=label,
-                scope=scope,
-                state=state,
-                orphaned=orphaned,
-                path=str(plist),
-            )
+            rows.append([label, scope, state, "yes" if orphaned else "no", str(plist)])
             shown += 1
 
+    event = "startup_orphans_list" if orphans_only else "startup_list"
+    reporter.table(
+        event,
+        ["Label", "Scope", "State", "Orphaned", "Path"],
+        rows,
+    )
     if orphans_only:
         reporter.info("startup_orphans_complete", count=shown)
     return 0
@@ -551,21 +550,23 @@ def _run_bba(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
 
     if args.bba_action == "list":
         items = bba_mod.find_bba_orphans(include_state=True)
-        reporter.info(
-            "bba_orphans_header",
-            columns=["Label", "Scope", "State", "Name", "Developer", "BundleIds", "Plist"],
+        rows = [
+            [
+                it.label,
+                it.scope,
+                it.state or "?",
+                it.name,
+                it.developer,
+                ",".join(it.associated_bundle_ids),
+                it.plist_url or "",
+            ]
+            for it in items
+        ]
+        reporter.table(
+            "bba_orphans_list",
+            ["Label", "Scope", "State", "Name", "Developer", "BundleIds", "Plist"],
+            rows,
         )
-        for it in items:
-            reporter.info(
-                "bba_orphan",
-                label=it.label,
-                scope=it.scope,
-                state=it.state or "?",
-                name=it.name,
-                developer=it.developer,
-                bundle_ids=",".join(it.associated_bundle_ids),
-                plist=it.plist_url or "",
-            )
         reporter.info("bba_orphans_complete", count=len(items))
         return 0
 

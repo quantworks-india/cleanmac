@@ -144,7 +144,7 @@ class Reporter:
         # Color only when stdout is a terminal and not disabled by NO_COLOR.
         if color is None:
             color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
-        self._color = color
+        self._color: bool = bool(color)
 
     def _emit(self, level: str, event: str, **fields: object) -> None:
         if self.json_mode:
@@ -175,6 +175,11 @@ class Reporter:
     def section(self, title: str) -> None:
         if not self.json_mode:
             print(view.section(title))
+
+    def dryrun(self) -> None:
+        """Print the dry-run banner (human mode only; no-op in JSON)."""
+        if not self.json_mode:
+            print(view.dryrun_banner(enabled=self._color))
 
     def info(self, event: str, **fields: object) -> None:
         self._emit("info", event, **fields)
