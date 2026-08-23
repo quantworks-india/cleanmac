@@ -61,6 +61,90 @@ class AppInfo:
     size_kb: int
 
 
+@dataclass
+class UninstallTarget:
+    """What we are removing. A live .app, leftover-only, or a name/id.
+
+    ``app_installed`` is False when the bundle is already gone but the
+    target still resolves by name or bundle id for leftover cleanup.
+    """
+
+    name: str
+    bundle_id: str | None
+    path: str  # empty "" when the .app is no longer present
+    app_installed: bool
+    query: str
+
+
+def _scan_apps_in(directory: str) -> list[AppInfo]:
+    """List .app bundles directly under ``directory`` (does not recurse)."""
+    apps: list[AppInfo] = []
+    if not os.path.isdir(directory):
+        return apps
+    for entry in os.scandir(directory):
+        if not entry.name.endswith(".app") or not entry.is_dir():
+            continue
+        name, bundle = _parse_info_plist(entry.path)
+        apps.append(
+            AppInfo(
+                name=name or entry.name[:-4],
+                bundle_id=bundle,
+                path=entry.path,
+                version=None,
+                size_kb=0,
+            )
+        )
+    return apps
+
+
+def _candidate_dirs() -> list[str]:
+    """Directories to scan for installed apps (respects CLEANMAC_HOME)."""
+    home = os.environ.get("CLEANMAC_HOME") or str(Path.home())
+    return ["/Applications", os.path.join(home, "Applications")]
+
+
+def resolve(query: str) -> UninstallTarget:
+    """Resolve a name or bundle id to an uninstall target.
+
+    Matches display name, bundle id, and .app basename. If no live app
+    matches but the query itself is a plausible name/bundle, returns a
+    leftover-only target so cleanup can still run.
+    """
+    q = query.strip()
+    if not q:
+        raise SystemExit("Uninstall needs an app name or bundle id.")
+
+    apps: list[AppInfo] = []
+    for d in _candidate_dirs():
+        apps.extend(_scan_apps_in(d))
+
+    lowered = q.lower()
+    for a in apps:
+        if (
+            a.name.lower() == lowered
+            or (a.bundle_id and a.bundle_id.lower() == lowered)
+            or os.path.splitext(os.path.basename(a.path))[0].lower() == lowered
+        ):
+            return UninstallTarget(
+                name=a.name,
+                bundle_id=a.bundle_id,
+                path=a.path,
+                app_installed=True,
+                query=q,
+            )
+
+    # No live app: leftover-only target. Bundle id if it looks like one,
+    # otherwise treat the query as a display/name hint.
+    looks_like_bundle = "." in q
+    return UninstallTarget(
+        name=q,
+        bundle_id=q if looks_like_bundle else None,
+        path="",
+        app_installed=False,
+        query=q,
+    )
+
+
 def _parse_info_plist(app_path: str) -> tuple[str | None, str | None]:
     plist = os.path.join(app_path, "Contents", "Info.plist")
     try:

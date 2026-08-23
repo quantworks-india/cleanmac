@@ -56,6 +56,42 @@ def test_fingerprint_lists_support_leftovers(fake_app):
     assert any("Application Support" in p and "MyApp" in p for p in fp["leftovers"])
 
 
+def test_resolve_returns_leftover_only_when_app_gone(fake_app):
+    """No live .app must still resolve (leftover-only), not raise App not found."""
+    home, _app = fake_app
+    # Simulate the app being uninstalled already.
+    import shutil
+    shutil.rmtree(str(home / "Applications" / "MyApp.app"))
+    # Leftover dir still exists.
+    (home / "Library" / "Application Support" / "MyApp").mkdir(parents=True, exist_ok=True)
+
+    target = au.resolve("com.example.myapp")
+    assert target.bundle_id == "com.example.myapp"
+    assert target.path == ""  # no live bundle
+    assert target.app_installed is False
+
+
+def test_resolve_live_app_by_display_name(fake_app):
+    home, app = fake_app
+    target = au.resolve("MyApp")
+    assert target.app_installed is True
+    assert target.path == str(home / "Applications" / "MyApp.app")
+
+
+def test_resolve_live_app_by_bundle_id(fake_app):
+    home, app = fake_app
+    target = au.resolve("com.example.myapp")
+    assert target.app_installed is True
+    assert target.path == str(home / "Applications" / "MyApp.app")
+
+
+def test_resolve_matches_app_basename(fake_app):
+    home, app = fake_app
+    # Match the .app folder name (MyApp.app -> MyApp) even if name differs.
+    target = au.resolve("MyApp")
+    assert target.app_installed is True
+
+
 def test_run_uninstall_dry_run_lists_fingerprint(fake_app, monkeypatch, capsys):
     """Without --commit, _run_uninstall prints the fingerprint and touches nothing."""
     home, app = fake_app
