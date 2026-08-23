@@ -112,6 +112,22 @@ No regex on `backgrounditems.btm` or `mount(8)` text; no hand-rolled vendor
 no installed app name/attribution matches **and** both its executable and plist
 are missing from disk.
 
+### Human output
+
+Default (human) mode renders aligned tables and readable status lines instead
+of debug dumps:
+
+```bash
+cleanmac disk summary
+# Size       Path
+# ---------  ----------------------------
+# 269.5 GB   Library
+# 120.0 GB   .colima
+# 5.9 GB     Pictures
+```
+
+Color is applied only when stdout is a terminal; set `NO_COLOR=1` to disable.
+
 ### JSON output
 
 `--json` rewrites stdout as newline-delimited JSON events:
