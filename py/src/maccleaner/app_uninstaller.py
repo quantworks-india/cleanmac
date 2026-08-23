@@ -382,6 +382,8 @@ def _build_fingerprint_for_target(target) -> dict:
     )
     fp = _build_fingerprint(app)
     fp["system_paths"] = _system_paths(app)
+    fp["brew"] = brew_paths(target.bundle_id or "", target.name)
+    fp["helpers"] = helper_paths(target.bundle_id or "", target.name)
     # Do not call sfltool dumpbtm here. That tool shows a macOS
     # authorization popup we cannot grant or dismiss from the CLI.
     fp["bba"] = []
@@ -390,6 +392,73 @@ def _build_fingerprint_for_target(target) -> dict:
 
 def _is_system_launch(path: str) -> bool:
     return "LaunchDaemons" in path or path.startswith("/Library/LaunchAgents")
+
+
+def _classify_store(path: str) -> str:
+    """Map a leftover path to a matrix column (support/cache/prefs/...)."""
+    p = path.lower()
+    if "application support" in p:
+        return "support"
+    if "/caches/" in p or "caches" in p:
+        return "cache"
+    if "preferences" in p:
+        return "prefs"
+    if "containers" in p:
+        return "container"
+    if "saved application state" in p:
+        return "saved"
+    if "launchagents" in p:
+        return "agents"
+    if "launchdaemons" in p:
+        return "daemons"
+    if "privilegedhelper" in p:
+        return "helpers"
+    if "receipts" in p or "pkgutil" in p:
+        return "pkg"
+    if "brew" in p or "caskroom" in p or "cellar" in p:
+        return "brew"
+    return "other"
+
+
+def _build_matrix(target, fp: dict) -> dict[str, str]:
+    """Classify every leftover/launch/brew/helper path into a store flag.
+
+    Returns {column: "Y"|"N"|"—"}. Columns with no delete action (kext,
+    btm) are always "—".
+    """
+    matrix: dict[str, str] = {
+        "app": "Y" if target.app_installed else "N",
+        "mas": "Y" if target.app_installed else "—",
+        "pkg": "N",
+        "brew": "N",
+        "support": "N",
+        "cache": "N",
+        "prefs": "N",
+        "container": "N",
+        "saved": "N",
+        "agents": "N",
+        "daemons": "N",
+        "helpers": "N",
+        "kext": "—",
+        "btm": "—",
+    }
+
+    def mark(column: str, paths) -> None:
+        if paths and matrix.get(column) != "Y":
+            matrix[column] = "Y"
+
+    # launch items already carry system vs user scope via path.
+    for label, path in zip(fp.get("launch_labels", []), fp.get("launch_paths", [])):
+        if path:
+            mark("daemons" if "LaunchDaemons" in path else "agents", [path])
+    for p in fp.get("leftovers", []):
+        mark(_classify_store(p), [p])
+    for p in fp.get("system_paths", []):
+        mark(_classify_store(p), [p])
+    mark("brew", fp.get("brew", []))
+    mark("helpers", fp.get("helpers", []))
+    mark("pkg", fp.get("pkg", []))
+    return matrix
 
 
 def _quarantine_launch(label, path, deleter, sudo, reporter) -> None:

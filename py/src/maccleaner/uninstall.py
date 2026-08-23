@@ -43,12 +43,15 @@ def run(args: Any, deleter: Deleter, sudo: Sudo | None, reporter: Reporter) -> i
 
     target = resolve(target_text)
 
-    # 2. Build the full fingerprint: leftover paths + owned launch items.
+    # 2. Build the full fingerprint + boolean matrix.
     fp = au._build_fingerprint_for_target(target)
     user = list(fp.get("leftovers", []))
     sys_paths = list(fp.get("system_paths", []))
     launch = list(fp.get("launch_paths", []))
+    brew = list(fp.get("brew", []))
+    helpers = list(fp.get("helpers", []))
     bba_items = list(fp.get("bba", []))  # (label, plist_url)
+    matrix = au._build_matrix(target, fp)
 
     reporter.info(
         "uninstall_plan",
@@ -56,12 +59,22 @@ def run(args: Any, deleter: Deleter, sudo: Sudo | None, reporter: Reporter) -> i
         bundle_id=target.bundle_id or "",
         app_installed=target.app_installed,
         bundle_path=target.path or "",
+        matrix=matrix,
         leftover_count=len(user),
         system_count=len(sys_paths),
         launch_count=len(launch),
+        brew_count=len(brew),
+        helpers_count=len(helpers),
         bba_count=len(bba_items),
     )
-    for p in user + sys_paths:
+    if not reporter.json_mode:
+        cols = [
+            "app", "mas", "pkg", "brew", "support", "cache", "prefs",
+            "container", "saved", "agents", "daemons", "helpers", "kext", "btm",
+        ]
+        print("  " + "  ".join(f"{c:>10}" for c in cols))
+        print("  " + "  ".join(f"{matrix.get(c, '—'):>10}" for c in cols))
+    for p in user + sys_paths + brew + helpers:
         reporter.info("uninstall_target", path=p)
     for label, plist_url in bba_items:
         reporter.info("uninstall_bba_target", label=label, plist=plist_url)
