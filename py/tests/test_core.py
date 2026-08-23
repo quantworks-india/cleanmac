@@ -29,6 +29,21 @@ def isolated_home(tmp_path, monkeypatch):
     return tmp_path
 
 
+def test_sudo_ensure_asks_in_the_terminal(monkeypatch):
+    """sudo -v must inherit stdin/stdout so the password prompt is in Terminal,
+    not a macOS GUI popup (capture_output hides the TTY)."""
+    seen: dict = {}
+
+    def fake_run(cmd, **kw):
+        seen.update(kw)
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(core.subprocess, "run", fake_run)
+    assert core.Sudo().ensure() is True
+    assert seen.get("capture_output") is not True
+    assert seen.get("stdin") is None or seen.get("stdin") is not core.subprocess.DEVNULL
+
+
 def test_safe_path_refuses_protected_roots(tmp_path):
     for root in ["/", "/System", "/Library", "/Applications", "/Users", "/usr"]:
         assert not is_safe_path(root), root

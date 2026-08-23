@@ -365,14 +365,9 @@ class Sudo:
         self._ready = False
 
     def ensure(self) -> bool:
-        """Run sudo -v once. Sets ready flag. Returns True if elevation available."""
+        """Run sudo -v once on the real Terminal (no capture). Sets ready flag."""
         try:
-            r = subprocess.run(
-                ["sudo", "-v"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            r = subprocess.run(["sudo", "-v"], check=False)
             self._ready = r.returncode == 0
         except FileNotFoundError:
             self._ready = False

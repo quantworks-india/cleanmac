@@ -73,3 +73,53 @@ def test_run_rejects_missing_target():
     rc = u.run(args, d, None, reporter)
     assert rc == 2
     aud.close()
+
+
+def test_quarantine_system_plist_uses_sudo(tmp_path, monkeypatch):
+    """A LaunchDaemon must be moved via sudo, not shutil as the user."""
+    src = tmp_path / "Library" / "LaunchDaemons" / "us.zoom.ZoomDaemon.plist"
+    src.parent.mkdir(parents=True)
+    src.write_text("plist")
+    home = tmp_path / "home"
+    monkeypatch.setenv("CLEANMAC_HOME", str(home))
+    cmds: list[list[str]] = []
+
+    class FakeSudo:
+        def run(self, args):
+            cmds.append(list(args))
+            dest = home / "Library" / "LaunchAgents-disabled" / src.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if args and args[0] == "mv":
+                src.rename(dest)
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    au._quarantine_launch(
+        "us.zoom.ZoomDaemon",
+        str(src),
+        type("D", (), {"commit": True})(),
+        FakeSudo(),
+        Reporter(),
+    )
+    assert any(c[:1] == ["mv"] for c in cmds)
+    assert not src.exists()
+
+
+def test_quarantine_system_plist_does_not_crash_without_sudo(tmp_path, monkeypatch):
+    """Permission denied on a system plist must not traceback."""
+    src = tmp_path / "Library" / "LaunchDaemons" / "com.example.d.plist"
+    src.parent.mkdir(parents=True)
+    src.write_text("plist")
+    monkeypatch.setenv("CLEANMAC_HOME", str(tmp_path / "home"))
+
+    class BoomSudo:
+        def run(self, args):
+            raise PermissionError("denied")
+
+    au._quarantine_launch(
+        "com.example.d",
+        str(src),
+        type("D", (), {"commit": True})(),
+        BoomSudo(),
+        Reporter(),
+    )
+    assert src.exists()

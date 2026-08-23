@@ -326,10 +326,14 @@ def _build_fingerprint_for_target(target) -> dict:
     return fp
 
 
+def _is_system_launch(path: str) -> bool:
+    return "LaunchDaemons" in path or path.startswith("/Library/LaunchAgents")
+
+
 def _quarantine_launch(label, path, deleter, sudo, reporter) -> None:
     """Bootout + move a launch plist to quarantine (never hard-delete).
 
-    Falls back to a plain move if launchctl bootout fails or is unavailable.
+    System-scope plists are moved with sudo. Failures are reported, not raised.
     """
     import shutil
 
@@ -337,22 +341,47 @@ def _quarantine_launch(label, path, deleter, sudo, reporter) -> None:
     quarantine = home / "Library" / "LaunchAgents-disabled"
     quarantine.mkdir(parents=True, exist_ok=True)
     dest = quarantine / os.path.basename(path)
-    if deleter.commit:
-        try:
-            scope = "system" if "LaunchDaemons" in path or "/Library/LaunchAgents" in path else "user"
-            target_label = label
-            if scope == "system" and sudo:
-                sudo.run(["launchctl", "bootout", f"system/{target_label}"])
-            else:
-                import subprocess
-                subprocess.run(["launchctl", "bootout", f"gui/501/{target_label}"],
-                               capture_output=True)
-        except Exception:
-            pass
-        shutil.move(path, str(dest))
-        reporter.info("launch_quarantined", label=label, to=str(dest))
-    else:
+    system = _is_system_launch(path)
+    if not deleter.commit:
         reporter.info("launch_would_quarantine", label=label, to=str(dest))
+        return
+    try:
+        if system:
+            if sudo is None:
+                reporter.warn(
+                    "launch_quarantine_failed",
+                    label=label,
+                    path=path,
+                    err="needs sudo",
+                )
+                return
+            sudo.run(["launchctl", "bootout", f"system/{label}"])
+            r = sudo.run(["mv", path, str(dest)])
+            if r.returncode != 0:
+                reporter.warn(
+                    "launch_quarantine_failed",
+                    label=label,
+                    path=path,
+                    err=getattr(r, "stderr", "") or "mv failed",
+                )
+                return
+        else:
+            import subprocess
+
+            subprocess.run(
+                ["launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
+                capture_output=True,
+                check=False,
+            )
+            shutil.move(path, str(dest))
+        reporter.info("launch_quarantined", label=label, to=str(dest))
+    except OSError as exc:
+        reporter.warn(
+            "launch_quarantine_failed",
+            label=label,
+            path=path,
+            err=str(exc),
+        )
 
 
 def _run_remove(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:

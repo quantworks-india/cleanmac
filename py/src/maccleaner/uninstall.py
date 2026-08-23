@@ -71,6 +71,14 @@ def run(args: Any, deleter: Deleter, sudo: Sudo | None, reporter: Reporter) -> i
         reporter.warn("uninstall_aborted")
         return 0
 
+    needs_root = any(
+        au._is_system_launch(p)
+        for p in launch + sys_paths + [plist for _lbl, plist in bba_items if plist]
+    )
+    if needs_root and sudo is not None:
+        if not sudo.ensure():
+            reporter.warn("sudo_unavailable", msg="system items will be skipped")
+
     deleter.commit = True
     deleter.confirm_fn = lambda _p: True
     if target.app_installed and target.path:
