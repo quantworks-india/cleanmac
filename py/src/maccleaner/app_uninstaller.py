@@ -246,6 +246,70 @@ def _vendor_prefix(bundle_id: str) -> str:
     return f"{parts[0]}.{parts[1]}."
 
 
+def _brew_prefix() -> str:
+    """Homebrew install prefix. Empty if brew isn't installed."""
+    env = os.environ.get("CLEANMAC_BREW_PREFIX")
+    if env:
+        return env
+    for cand in ("/opt/homebrew", "/usr/local"):
+        if os.path.isdir(cand):
+            return cand
+    try:
+        r = subprocess.run(
+            ["brew", "--prefix"], capture_output=True, text=True, check=False
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except (OSError, FileNotFoundError):
+        pass
+    return ""
+
+
+def brew_paths(bundle_id: str, name: str) -> list[str]:
+    """Homebrew leftovers: the Caskroom cask and Cellar formula, if present."""
+    prefix = _brew_prefix()
+    if not prefix:
+        return []
+    found: list[str] = []
+    basename = name.split(".")[-1].lower() if name else ""
+    for sub in ("Caskroom", "Cellar"):
+        d = os.path.join(prefix, sub)
+        if not os.path.isdir(d):
+            continue
+        for candidate in (name.lower(), basename, bundle_id.split(".")[-1].lower()):
+            p = os.path.join(d, candidate)
+            if os.path.isdir(p):
+                found.append(p)
+    return sorted(set(found))
+
+
+def _helper_dir() -> str:
+    """Directory holding privileged helper executables."""
+    env = os.environ.get("CLEANMAC_HELPERS_DIR")
+    if env:
+        return env
+    return "/Library/PrivilegedHelperTools"
+
+
+def helper_paths(bundle_id: str, name: str) -> list[str]:
+    """Privileged helper executables matching the vendor prefix or name."""
+    d = _helper_dir()
+    if not os.path.isdir(d):
+        return []
+    prefix = _vendor_prefix(bundle_id)
+    lowered_name = name.lower()
+    found: list[str] = []
+    for entry in os.scandir(d):
+        if not entry.is_file():
+            continue
+        e = entry.name.lower()
+        if prefix and e.startswith(prefix):
+            found.append(entry.path)
+        elif lowered_name and lowered_name in e:
+            found.append(entry.path)
+    return sorted(set(found))
+
+
 def _build_fingerprint(app: AppInfo, home: Path | None = None) -> dict:
     """Find every launch plist + leftover owned by ``app``.
 
