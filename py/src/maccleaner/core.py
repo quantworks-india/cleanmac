@@ -15,10 +15,13 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+
+from maccleaner import view
 
 STATE_DIR = Path(
     os.environ.get("CLEANMAC_STATE_DIR", Path.home() / ".local/state/cleanmac")
@@ -125,24 +128,53 @@ def size_human(kb: int) -> str:
 class Reporter:
     """Routes events to stdout (human or JSON) and optionally to audit.
 
-    Human mode (default): single-line readable messages on stdout.
+    Human mode (default): readable lines via view; no `[info] k=v` dump.
     JSON mode: one JSON object per event on stdout, machine-parseable.
     Audit log file is independent and always receives a corresponding line.
     """
 
-    def __init__(self, json_mode: bool = False, verbose: bool = False) -> None:
+    def __init__(
+        self,
+        json_mode: bool = False,
+        verbose: bool = False,
+        color: bool | None = None,
+    ) -> None:
         self.json_mode = json_mode
         self.verbose = verbose
+        # Color only when stdout is a terminal and not disabled by NO_COLOR.
+        if color is None:
+            color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+        self._color = color
 
     def _emit(self, level: str, event: str, **fields: object) -> None:
         if self.json_mode:
             payload = {"level": level, "event": event, **fields}
             print(json.dumps(payload))
-        else:
-            parts = [event]
-            for k, v in fields.items():
-                parts.append(f"{k}={v}")
-            print(f"[{level}] " + " ".join(parts))
+            return
+        # Human path: readable status line (falls back gracefully for unknown events).
+        msg = view.status(level, event, enabled=self._color)
+        if fields:
+            vals = "  ".join(f"{k}={v}" for k, v in fields.items())
+            msg += f"  {vals}"
+        print(msg)
+
+    def table(
+        self,
+        event: str,
+        headers: list[str],
+        rows: list[list[str]],
+        **fields: object,
+    ) -> None:
+        """Render a table in human mode; keep the same event in JSON mode."""
+        if self.json_mode:
+            payload = {"level": "info", "event": event, "headers": headers, "rows": rows, **fields}
+            print(json.dumps(payload))
+            return
+        print(view.table(headers, rows))
+
+    def section(self, title: str) -> None:
+        if not self.json_mode:
+            print(view.section(title))
 
     def info(self, event: str, **fields: object) -> None:
         self._emit("info", event, **fields)
