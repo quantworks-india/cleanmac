@@ -6,16 +6,17 @@ set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-KNOWN_SUBCOMMANDS="app dup disk mem hidden"
+KNOWN_SUBCOMMANDS="uninstall app dup disk mem hidden"
 
 # Find the first non-flag arg to decide which engine to invoke.
-# Global flags are at most: --dry-run, --commit, --json, --verbose, -v.
+# Anything starting with '-' is a flag (skip). Stops at '--' or a positional.
 first_positional=""
 for arg in "$@"; do
   case "$arg" in
-    --dry-run|--commit|--json|--verbose|-v) continue ;;
     --) break ;;
-    *)  first_positional="$arg"; break ;;
+    --*) continue ;;
+    -*)  continue ;;
+    *)   first_positional="$arg"; break ;;
   esac
 done
 

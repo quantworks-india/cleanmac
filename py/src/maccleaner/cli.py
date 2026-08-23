@@ -44,6 +44,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="tool", required=True)
 
+    # ── uninstall ───────────────────────────────────────────────────
+    # The one product surface this pass. `cleanmac uninstall [target]`.
+    uni = sub.add_parser(
+        "uninstall",
+        help="Remove an app and every leftover it leaves behind",
+    )
+    uni.add_argument(
+        "target",
+        nargs="?",
+        help="App name or bundle id (omit for the interactive picker)",
+    )
+
     # ── app ─────────────────────────────────────────────────────────
     app = sub.add_parser("app", help="App Cleaner & Uninstaller")
     app_sub = app.add_subparsers(dest="app_cmd", required=True)
@@ -131,6 +143,8 @@ def main(argv: list[str] | None = None) -> int:
         sudo.ensure()
 
     try:
+        if args.tool == "uninstall":
+            return _run_uninstall(args, deleter, sudo, reporter)
         if args.tool == "app":
             return _run_app(args, deleter, sudo, reporter)
         if args.tool == "dup":
@@ -164,6 +178,12 @@ def _run_app(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
     from maccleaner import app_uninstaller
 
     return app_uninstaller.run(args, deleter, sudo, reporter)
+
+
+def _run_uninstall(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
+    from maccleaner import uninstall as uninstall_mod
+
+    return uninstall_mod.run(args, deleter, sudo, reporter)
 
 
 def _run_dup(args, deleter: Deleter, reporter: Reporter) -> int:
