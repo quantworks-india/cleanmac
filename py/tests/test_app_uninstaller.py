@@ -293,21 +293,18 @@ def orphan_home(tmp_path, monkeypatch):
     return tmp_path, orphan_path
 
 
-def test_find_orphans_skips_live_agents(orphan_home):
-    _, _ = orphan_home
-    orphans = au.find_orphans()
-    labels = [o.label for o in orphans]
-    assert "com.example.removed" in labels
-    assert "com.example.realapp" not in labels
-
-
-def test_find_orphans_returns_orphan_dataclass(orphan_home):
+def test_is_item_orphan_skips_live_agents(orphan_home):
+    """An agent whose exe exists and whose label matches an installed app is live."""
     _, orphan_path = orphan_home
-    orphans = au.find_orphans()
-    removed = next(o for o in orphans if o.label == "com.example.removed")
-    assert removed.path == str(orphan_path)
-    assert removed.scope == "user"
-    assert removed.exe and "GhostApp.app" in removed.exe
+    # Live agent: label matches installed 'RealApp.app'.
+    exe = str(orphan_path.with_suffix(".realapp"))
+    assert au._is_item_orphan("com.example.realapp", exe, {"realapp.app"}) is False
+
+
+def test_is_item_orphan_flags_missing_exe(orphan_home):
+    """A removed agent with a missing exe and no matching app is orphan."""
+    _, orphan_path = orphan_home
+    assert au._is_item_orphan("com.example.removed", "/nonexistent/ghostapp", set()) is True
 
 
 def test_orphans_purge_dry_run_leaves_files(orphan_home):
@@ -437,43 +434,39 @@ def test_orphans_purge_skips_missing_plist(orphan_home):
     aud.close()
 
 
-def test_run_orphans_list_dispatches(orphan_home, monkeypatch):
-    tmp_path, _ = orphan_home
-    monkeypatch.setattr(au, "_startup_list", lambda r, orphans_only=False: 9)
+def test_run_orphans_list_delegates_to_bba(orphan_home, monkeypatch):
+    """_run_orphans routes list to the BBA engine."""
+    captured = {}
+
+    def fake_bba(args, deleter, sudo, reporter):
+        captured["action"] = args.bba_action
+        return 9
+
+    monkeypatch.setattr(au, "_run_bba", fake_bba)
     args = type("A", (), {"orphans_action": "list"})()
-    from maccleaner.core import Auditor, Deleter
-    aud = Auditor("orphan-list", mode="dry-run")
-    d = Deleter(aud, commit=False)
-    rc = au._run_orphans(args, d, None, Reporter())
+    rc = au._run_orphans(args, None, None, Reporter())
     assert rc == 9
-    aud.close()
+    assert captured["action"] == "list"
 
 
-def test_run_orphans_purge_dry_run_no_commit(orphan_home, monkeypatch):
-    """Without --commit, the dispatch path returns 0 without touching anything.
+def test_run_orphans_purge_delegates_to_bba(orphan_home, monkeypatch):
+    """_run_orphans purge routes through the BBA engine (dry-run no touch)."""
+    captured = {}
 
-    find_orphans is stubbed to avoid scanning the real /Library on macOS.
-    """
-    tmp_path, orphan_path = orphan_home
-    monkeypatch.setattr(
-        au,
-        "find_orphans",
-        lambda: [
-            au.Orphan(
-                label="com.example.removed",
-                path=str(orphan_path),
-                exe=str(orphan_path.with_suffix("")),
-                scope="user",
-            )
-        ],
-    )
+    def fake_bba(args, deleter, sudo, reporter):
+        captured["action"] = args.bba_action
+        captured["commit"] = args.commit
+        return 0
+
+    monkeypatch.setattr(au, "_run_bba", fake_bba)
     from maccleaner.core import Auditor, Deleter
     aud = Auditor("orphan-purge-dry", mode="dry-run")
     d = Deleter(aud, commit=False)
     args = type("A", (), {"orphans_action": "purge", "commit": False, "yes": False})()
     rc = au._run_orphans(args, d, None, Reporter())
     assert rc == 0
-    assert orphan_path.exists(), "dry-run must not touch plist"
+    assert captured["action"] == "purge"
+    assert captured["commit"] is False
     aud.close()
 
 
@@ -485,3 +478,35 @@ def test_run_orphans_purge_unknown_action_returns_2(orphan_home):
     rc = au._run_orphans(args, d, None, Reporter())
     assert rc == 2
     aud.close()
+
+
+# ── Task 7: collapse dual orphan engines ─────────────────────────────
+
+def test_orphan_brands_constant_removed():
+    """The hardcoded vendor/brand dictionary is gone."""
+    assert not hasattr(au, "ORPHAN_BRANDS")
+
+
+def test_run_orphans_delegates_to_bba_engine(orphan_home, monkeypatch):
+    """app orphans list routes through the BBA/sfltool engine, not the
+    legacy launch-plist walker."""
+    captured = {"n": 0}
+
+    def fake_bba(args, *a, **kw):
+        captured["n"] += 1
+        assert args.bba_action == "list"
+        return 0
+
+    monkeypatch.setattr(au, "_run_bba", fake_bba)
+    args = type("A", (), {"orphans_action": "list"})()
+    rc = au._run_orphans(args, None, None, Reporter())
+    assert rc == 0
+    assert captured["n"] == 1
+
+
+def test_legacy_find_orphans_removed():
+    """The regex/brand-based find_orphans() is gone (single engine)."""
+    assert not hasattr(au, "find_orphans")
+    assert not hasattr(au, "_is_orphan")
+    assert not hasattr(au, "get_installed_app_names")
+    assert not hasattr(au, "ORPHAN_BRANDS")

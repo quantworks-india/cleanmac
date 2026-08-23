@@ -199,119 +199,6 @@ class Orphan:
     scope: str  # "user" or "system"
 
 
-# Brands whose apps frequently leave launchd residue after uninstall.
-# Triggered when no installed app matches the brand string.
-ORPHAN_BRANDS: dict[str, list[str]] = {
-    # Apps whose uninstallers commonly leave system LaunchDaemons behind.
-    "adobe": ["adobe", "armdc", "acrobat"],
-    "avast": ["avast"],
-    "box": ["box"],
-    "onedrive": ["onedrive", "syncreporter"],
-    "zoom": ["zoom"],
-    "nordvpn": ["nordvpn"],
-    "oracle": ["oracle", "java"],
-    "logitech": ["logitech"],
-}
-
-
-def get_installed_app_names() -> set[str]:
-    """Names of installed apps in /Applications and ~/Applications.
-
-    Only counts bundles with a Contents/Info.plist — empty stub directories
-    (e.g. partial uninstalls) are ignored so they don't shield orphaned
-    launchd entries from detection.
-    """
-    names: set[str] = set()
-    for base in [Path("/Applications"), Path.home() / "Applications"]:
-        if not base.is_dir():
-            continue
-        for p in base.glob("*.app"):
-            if (p / "Contents" / "Info.plist").is_file():
-                names.add(p.name.lower())
-    return names
-
-
-def _is_orphan(label: str, exe: str | None, installed_apps: set[str]) -> bool:
-    """Return True if this launch item appears to be from an uninstalled app.
-
-    Detection order (any one positive returns True):
-
-    1. Exe path references ``/Applications/X.app`` (system scope) and the
-       bundle is gone. Sandbox/user-scope paths like ``~/Applications`` are
-       resolved via ``installed_apps`` instead.
-    2. Label matches a known-bad-uninstaller brand (adobe/avast/box/onedrive)
-       AND no installed app contains that brand string.
-    3. Exe itself is missing on disk.
-    """
-    if not exe:
-        return False
-
-    # 1. System-scope `/Applications/X.app` reference.
-    # We anchor at the start of a path component, so ``/foo/Applications/X.app``
-    # does NOT match (a regex without anchors would).
-    if exe.startswith("/Applications/"):
-        first_seg = exe.split("/", 3)  # ["", "Applications", "X.app", ...]
-        if len(first_seg) >= 3 and first_seg[2].endswith(".app"):
-            app_path = f"/Applications/{first_seg[2]}"
-            if not os.path.exists(app_path):
-                return True
-
-    # 2. Brand-based detection
-    lower = label.lower()
-    for brand, triggers in ORPHAN_BRANDS.items():
-        if any(t in lower for t in triggers):
-            if not any(brand in a or any(t in a for t in triggers) for a in installed_apps):
-                return True
-
-    # 3. Executable itself is missing
-    if not os.path.exists(exe):
-        return True
-
-    return False
-
-
-def find_orphans() -> list[Orphan]:
-    """Walk all launch dirs and return orphaned items (from uninstalled apps).
-
-    Honors ``CLEANMAC_HOME`` so the user-scope directory is sandboxed in tests.
-    System-scope directories (``/Library/LaunchAgents``, ``/Library/LaunchDaemons``)
-    are always scanned on the real filesystem — they can't be relocated.
-    """
-    home = Path(os.environ.get("CLEANMAC_HOME", Path.home()))
-    dirs = [
-        home / "Library/LaunchAgents",
-        Path("/Library/LaunchAgents"),
-        Path("/Library/LaunchDaemons"),
-    ]
-    installed = get_installed_app_names()
-    out: list[Orphan] = []
-    for d in dirs:
-        if not d.is_dir():
-            continue
-        for plist in sorted(d.glob("*.plist")):
-            label = plist.stem
-            exe = None
-            try:
-                with plist.open("rb") as f:
-                    data = plistlib.load(f)
-                label = data.get("Label", label)
-                prog = data.get("Program")
-                args = data.get("ProgramArguments") or []
-                exe = str(prog or (args[0] if args else "")).strip() or None
-            except (OSError, plistlib.InvalidFileException, PermissionError):
-                pass
-
-            if _is_orphan(label, exe, installed):
-                out.append(
-                    Orphan(
-                        label=label,
-                        path=str(plist),
-                        exe=exe,
-                        scope=_scope_for_path(str(d)),
-                    )
-                )
-    return out
-
 
 def _run_startup(args, sudo: Sudo, reporter: Reporter) -> int:
     if args.action == "list":
@@ -322,13 +209,19 @@ def _run_startup(args, sudo: Sudo, reporter: Reporter) -> int:
 
 
 def _startup_list(reporter: Reporter, orphans_only: bool = False) -> int:
-    """List every launch item, with a per-item orphan flag (or filter to orphans)."""
+    """List every launch item, with a per-item orphan flag (or filter to orphans).
+
+    Orphan is mechanical: the item is a leftover if its executable is missing
+    AND its label doesn't match an installed app (via the shared inventory).
+    """
+    from maccleaner import inventory
+
     dirs = [
         Path.home() / "Library/LaunchAgents",
         Path("/Library/LaunchAgents"),
         Path("/Library/LaunchDaemons"),
     ]
-    installed_apps = get_installed_app_names()
+    installed_apps = inventory.installed_app_names()
     header = "startup_orphans_header" if orphans_only else "startup_list_header"
     reporter.info(header, columns=["Label", "Scope", "State", "Orphaned", "Path"])
 
@@ -361,7 +254,7 @@ def _startup_list(reporter: Reporter, orphans_only: bool = False) -> int:
                 )
                 state = "running" if r.returncode == 0 else "stopped"
 
-            orphaned = _is_orphan(label, exe, installed_apps)
+            orphaned = _is_item_orphan(label, exe, installed_apps)
 
             if orphans_only and not orphaned:
                 continue
@@ -379,6 +272,26 @@ def _startup_list(reporter: Reporter, orphans_only: bool = False) -> int:
     if orphans_only:
         reporter.info("startup_orphans_complete", count=shown)
     return 0
+
+
+def _is_item_orphan(label: str, exe: str | None, installed_apps: set[str]) -> bool:
+    """Mechanical orphan check for a launch item.
+
+    An item is orphan iff its executable is missing AND no installed app
+    name matches the launch label. No brand dictionary.
+    """
+    # Label matches an installed app -> live.
+    label_l = label.lower()
+    for app in installed_apps:
+        stem = app[:-4] if app.endswith(".app") else app
+        stem = stem.lower()
+        if stem and (label_l == stem or label_l in stem or stem in label_l):
+            return False
+    # Executable still present -> live.
+    if exe and os.path.exists(exe):
+        return False
+    return True
+
 
 
 def _startup_disable(label: str, sudo: Sudo, reporter: Reporter) -> int:
@@ -525,24 +438,12 @@ def _orphans_purge(
 
 
 def _run_orphans(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
-    """Dispatch for the `app orphans` subcommand."""
-    if args.orphans_action == "list":
-        return _startup_list(reporter, orphans_only=True)
-    if args.orphans_action == "purge":
-        orphans = find_orphans()
-        if not orphans:
-            reporter.info("orphans_none")
-            return 0
-        reporter.info(
-            "orphans_found",
-            count=len(orphans),
-            items=[o.__dict__ for o in orphans],
-        )
-        if args.yes:
-            # Skip interactive per-item confirm
-            deleter.confirm_fn = lambda _p: True
-        return _orphans_purge(orphans, deleter, sudo, reporter, yes=args.yes)
-    return 2
+    """Dispatch for `app orphans`. Aliases the single BBA/sfltool engine."""
+    # Map orphans_action -> bba_action (same verbs).
+    bba_args = type("B", (), {"bba_action": args.orphans_action,
+                              "commit": getattr(args, "commit", False),
+                              "yes": getattr(args, "yes", False)})()
+    return _run_bba(bba_args, deleter, sudo, reporter)
 
 
 def _run_bba(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
