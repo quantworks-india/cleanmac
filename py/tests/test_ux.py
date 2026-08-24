@@ -76,6 +76,44 @@ def test_human_plan_header_fits_80_cols():
         assert len(line) <= 80, repr(line)
 
 
+def test_human_plan_color_off_has_no_ansi():
+    target = au.UninstallTarget(
+        "Firefox", "org.mozilla.firefox", "/Applications/Firefox.app", True, "Firefox"
+    )
+    text = au._human_plan(
+        target,
+        _matrix(support="Y"),
+        ["~/Library/Application Support/Firefox"],
+        home="/Users/sandeep",
+        color=False,
+    )
+    assert "\x1b" not in text
+
+
+def test_human_plan_color_on_marks_name_and_flags():
+    target = au.UninstallTarget(
+        "Firefox", "org.mozilla.firefox", "/Applications/Firefox.app", True, "Firefox"
+    )
+    text = au._human_plan(
+        target,
+        _matrix(support="Y", prefs="Y"),
+        ["~/Library/Application Support/Firefox"],
+        home="/Users/sandeep",
+        color=True,
+    )
+    assert "\x1b[" in text
+    assert "Firefox" in text
+    assert "support" in text
+
+
+def test_render_rows_colors_only_the_selection():
+    block = au._render_rows(["Alpha", "Beta"], idx=1, start=0, end=2, color=True)
+    assert "\x1b[" in block
+    assert "Beta" in block
+    plain = au._render_rows(["Alpha", "Beta"], idx=1, start=0, end=2, color=False)
+    assert "\x1b" not in plain
+
+
 def test_picker_paint_has_title_and_keys():
     text, n = au._picker_paint(
         ["Firefox  support  prefs"],

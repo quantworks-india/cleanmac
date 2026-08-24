@@ -464,11 +464,17 @@ def _matrix_has_leftovers(matrix: dict[str, str]) -> bool:
     return bool(_leftover_flags(matrix))
 
 
-def _picker_label(name: str, flags: list[str]) -> str:
+def _use_color() -> bool:
+    return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+
+def _picker_label(name: str, flags: list[str], *, color: bool = False) -> str:
     """One picker row: name, then leftover flags."""
-    if not flags:
-        return name
-    return f"{name}  {'  '.join(flags)}"
+    flag_text = "  ".join(flags)
+    if flags:
+        flag_text = view.color("yellow", flag_text, enabled=color)
+        return f"{name}  {flag_text}"
+    return name
 
 
 def _short_path(path: str, home: str | None = None) -> str:
@@ -483,18 +489,22 @@ def _human_plan(
     matrix: dict[str, str],
     paths: list[str],
     home: str | None = None,
+    *,
+    color: bool = False,
 ) -> str:
     """Product plan: name, id, leftover flags, short paths. No debug dump."""
     flags = _leftover_flags(matrix)
-    lines = [target.name]
+    name = view.color("bold", target.name, enabled=color)
+    lines = [name]
     if target.bundle_id:
-        lines.append(target.bundle_id)
+        lines.append(view.color("dim", target.bundle_id, enabled=color))
     if target.app_installed and target.path:
-        lines.append(_short_path(target.path, home=home))
+        lines.append(view.color("dim", _short_path(target.path, home=home), enabled=color))
     elif not target.app_installed:
-        lines.append("app already gone")
+        lines.append(view.color("dim", "app already gone", enabled=color))
     lines.append("")
-    lines.append("leftovers  " + ("  ".join(flags) if flags else "none"))
+    flag_text = "  ".join(flags) if flags else "none"
+    lines.append("leftovers  " + view.color("yellow", flag_text, enabled=color))
     for p in paths:
         lines.append(f"  {_short_path(p, home=home)}")
     return "\n".join(lines)
@@ -1244,7 +1254,7 @@ def _visible_window(idx: int, total: int, height: int = 15) -> tuple[int, int]:
 
 
 def _render_rows(
-    apps: list[str], idx: int, start: int, end: int
+    apps: list[str], idx: int, start: int, end: int, *, color: bool = False
 ) -> str:
     """Build a raw-mode-safe block of rows for indices [start, end).
 
@@ -1253,8 +1263,12 @@ def _render_rows(
     """
     lines: list[str] = []
     for i in range(start, end):
-        marker = "▸" if i == idx else " "
-        lines.append(f" {marker} {apps[i]}")
+        if i == idx:
+            marker = view.color("cyan", "▸", enabled=color)
+            row = view.color("cyan", apps[i], enabled=color)
+            lines.append(f" {marker} {row}")
+        else:
+            lines.append(f"   {apps[i]}")
     return "\r\n".join(lines)
 
 
@@ -1266,16 +1280,17 @@ def _picker_paint(
     prev_lines: int = 0,
     filter_text: str = "",
     count: int | None = None,
+    color: bool = False,
 ) -> tuple[str, int]:
     """Paint one picker frame. Rewind ``prev_lines`` instead of appending.
 
     Returns (bytes_to_write, line_count_of_this_frame).
     """
     n_apps = count if count is not None else len(apps)
-    title = f"uninstall — {n_apps} with leftovers"
-    keys = "up/down  enter  type to filter  q cancel"
-    body = _render_rows(apps, idx, start, end)
-    hint = f"  filter: {filter_text or '(type to filter)'}"
+    title = view.color("bold", f"uninstall — {n_apps} with leftovers", enabled=color)
+    keys = view.color("dim", "up/down  enter  type to filter  q cancel", enabled=color)
+    body = _render_rows(apps, idx, start, end, color=color)
+    hint = view.color("dim", f"  filter: {filter_text or '(type to filter)'}", enabled=color)
     frame_lines = [title, keys]
     if body:
         frame_lines.extend(body.split("\r\n"))
@@ -1330,7 +1345,8 @@ def _pick_app_interactive(reporter: Reporter) -> str | None:
             if idx >= len(shown):
                 idx = max(0, len(shown) - 1)
             start, end = _visible_window(idx, len(shown))
-            rows = [_picker_label(a.name, flags) for a, flags in shown]
+            use_color = _use_color()
+            rows = [_picker_label(a.name, flags, color=use_color) for a, flags in shown]
             frame, prev_lines = _picker_paint(
                 rows,
                 idx,
@@ -1339,6 +1355,7 @@ def _pick_app_interactive(reporter: Reporter) -> str | None:
                 prev_lines=prev_lines,
                 filter_text=query,
                 count=len(catalog),
+                color=use_color,
             )
             sys.stdout.write(frame)
             sys.stdout.flush()

@@ -9,6 +9,7 @@ from __future__ import annotations
 # ANSI codes (subset)
 _CODES: dict[str, str] = {
     "bold": "\x1b[1m",
+    "dim": "\x1b[2m",
     "red": "\x1b[31m",
     "green": "\x1b[32m",
     "yellow": "\x1b[33m",

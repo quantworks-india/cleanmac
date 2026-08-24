@@ -72,7 +72,7 @@ def run(args: Any, deleter: Deleter, sudo: Sudo | None, reporter: Reporter) -> i
         for p in paths:
             reporter.info("uninstall_target", path=p)
     else:
-        print(au._human_plan(target, matrix, paths))
+        print(au._human_plan(target, matrix, paths, color=au._use_color()))
 
     # 3. One yes/no gate. This is the only confirmation.
     if not confirm_yes(f"Delete {target.name} and leftovers?"):
