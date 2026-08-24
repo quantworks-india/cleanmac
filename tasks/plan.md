@@ -1,103 +1,97 @@
-# Implementation Plan: CLI performance
+# Implementation Plan: Uninstall matrix + brew/helper scanners
 
 ## Overview
 
-Measure-first. On this machine the product commands that feel slow are not
-the view layer — they are unbounded filesystem walks and N+1 Apple CLI
-calls. This plan cuts those costs with the same native tools (`du`,
-`launchctl`, `sfltool`), then re-measures. Neutral changes get reverted.
+Two changes, one uninstall slice:
 
-Replaces the completed CLI-output plan (shipped). One live plan set only.
+1. **Boolean matrix output** — the uninstall plan becomes one row per
+   app, one column per documented leftover store, cell = `Y` (present +
+   will delete) / `N` (absent) / `—` (not addressable). App-gone-but-
+   leftovers remains obvious at a glance.
+2. **Two new cleaners** — `brew` (Homebrew Caskroom/Cellar) and `helpers`
+   (PrivilegedHelperTools) — because the matrix is a *view* and today we
+   only *scan+delete* nine stores; these two have no code behind them.
 
-## Baseline (this host, 2026-08-23)
+Locked column set (docs-backed, union of Apple Library table + App Store
+receipt + SMAppService + Homebrew Cask uninstall/zap):
 
-| Command | Wall | What actually ran |
-|---------|------|-------------------|
-| `disk summary` (home) | **35.5s** | Python walk of **936,608** paths, then rollup — to print ~60 top-level rows |
-| `disk top` / `disk scan` | ~35s | Same full walk |
-| `disk system-data` | **7.4s** | Sequential `du -sk` of large Library trees |
-| `app startup list` | **2.5s** | `system_profiler` (~1.6s) + **one `launchctl print` per user plist** (no timeout) |
-| `app list` | **0.84s** | 21 apps × `du -sk` |
-| `app uninstall --name Code` | 0.44s | OK |
-| `mem heavy` / `hidden show` | 0.08s | OK |
-| `app orphans list` | **30s fail** | `sfltool dumpbtm` hung; timeout already added |
+```
+app  mas  pkg  brew  support  cache  prefs  container  saved  agents  daemons  helpers
+```
 
-`system_profiler` cold = 1.57s, cache hit = 0.000s (already cached per process).
+- `mas` (receipt) lives **inside** the `.app`; dies with the bundle. Rendered
+  `Y` only while the app is alive, else `—`. No separate delete.
+- `kext`, BTM/login items (`sfltool`), Keychain, TCC: **not addressable** —
+  render as `—`, never in the delete set.
+- `pkg` receipts, support/cache/prefs/container/saved/agents/daemons: already
+  cleaned today.
+
+Same command surface: `cleanmac uninstall [target]`, one `y/N` gate.
+
+## Current state
+
+| Column | Clean today? |
+|---|---|
+| app | yes — bundle delete |
+| support / cache / prefs / byhost / container / group / saved / webkit / http / cookies / logs / services / quicklook / spotlight | yes — USER_PATTERNS |
+| agents (user) | yes — quarantine |
+| daemons | yes — sudo quarantine |
+| pkg receipts | yes — SYSTEM_PATTERNS |
+| **brew** | **no code** |
+| **helpers** | **no code** |
 
 ## Architecture decisions
 
-- Stay on `feat/observability`.
-- **Match work to the question.** `disk summary` needs only immediate children. `disk top` needs a full size map but must not keep every file path in RAM.
-- Prefer one native `du` over a Python walk of 900k nodes.
-- Do not call `system_profiler` unless orphan detection needs the name set.
-- Do not N+1 `launchctl print`. One dump or skip live state.
-- `sfltool` stays official; cache the dump in-process; keep a hard timeout (consider 8s, fail closed).
-- No new deps. No disk cache of profiler JSON in v1 (PII + staleness).
-- Re-measure the same command after each task. If delta is inside noise, revert.
-- Log attempts in `tasks/perf-ledger.md` (kept and reverted).
+- `brew` clean = remove matching entry under `$(brew --prefix)/Caskroom`
+  (the installed cask) and any `Cellar/<name>` for a formula with the same
+  name. Homebrew keeps these trees; removing them is what a cask zap does
+  for Homebrew's own install directory. Treated as user-writable (brew is
+  user-owned by default).
+- `helpers` = scan `/Library/PrivilegedHelperTools` (and `~/Library/...` if
+  present) for executables whose name or embedded bundle id matches the
+  target vendor prefix or name. Requires sudo to delete.
+- Both scanners share the vendor-prefix rule (`us.zoom.xos` → `us.zoom.`).
+- Matrix is data: a dict of column → (present, path|None). Human prints the
+  transposed one-row form; JSON emits the same keys so it stays byte-identical
+  in shape.
 
-## Target budgets
+## Task List
 
-| Command | Budget |
-|---------|--------|
-| `disk summary` home | < 3s |
-| `disk top` home | < 15s (hard; still a full size job) |
-| `disk system-data` | < 4s |
-| `app startup list` | < 0.8s |
-| `app list` | < 0.4s |
-| `app orphans list` | fail in ≤ 8s if BTM hung; < 3s when `sfltool` is healthy |
-| Interactive picker | no `du` of every app before first paint |
+### Task 1: brew scanner
+- Add `brew_paths(bundle, name)` → matching Caskroom + Cellar entries
+- Add to fingerprint `fp["brew"]`
+- Tests: sandboxed fake Caskroom
 
-## Task list
+### Task 2: helpers scanner
+- Add `helper_paths(bundle, name)` under PrivilegedHelperTools
+- Add to fingerprint `fp["helpers"]`
+- Tests: sandboxed fake helpers dir
 
-See `tasks/todo.md`.
+### Checkpoint: fingerprint union complete
 
-### Phase 1: Disk (the 35s problem)
-- Task 1: `disk summary` = depth-1 only
-- Task 2: `disk top`/`scan` = dir-only rollup or one `du`, no 936k-path dict
+### Task 3: boolean matrix render (human + JSON)
+- `uninstall.py` builds column dict, prints one-row matrix
+- JSON identical shape
+- Tests: row string + JSON
 
-### Checkpoint: Disk
-- Re-measure summary and top vs baseline
-- Tests + ruff
+### Task 4: clean brew + helpers on `y`
+- Wire brew (user) + helpers (sudo) into the delete set
+- Tests: no-commit no-op; commit deletes
 
-### Phase 2: N+1 CLI
-- Task 3: `startup list` — no profiler unless orphans; no per-plist `launchctl`
-- Task 4: `list_apps` — lazy/skip size for picker; one-pass sizes for `app list`
-- Task 5: `sfltool` in-process cache + shorter timeout
+### Checkpoint: uninstall removes all addressable stores
 
-### Checkpoint: Interactive
-- Re-measure startup list, app list, orphans
-- Tests + ruff
-
-### Phase 3: Guard
-- Task 6: `disk system-data` one-pass / parallel `du`; perf ledger + a cheap regression test
-
-### Checkpoint: Complete
-- Ledger filled; budgets met or documented as remaining
+### Task 5: README + column legend
+- Document the row + which are `—`
 
 ## Risks
 
-| Risk | Impact | Mitigation |
-|------|--------|------------|
-| `du` output locale/path spaces | Med | `du -sk --` + split on first whitespace (existing pattern) |
-| Depth-1 summary misses nested “where is my space” | Low | That is `disk top`’s job |
-| Skipping launchctl state looks like a feature loss | Med | Keep a `?` or one `launchctl print gui/UID` parse |
-| Shorter sfltool timeout false-fails | Med | 8s; fail closed; message already exists |
-| Parallel `du` thrashes disk | Med | Sequential one-level `du` first; parallel only if still > budget |
+| Risk | Mitigation |
+|---|---|
+| Brew paths vary by prefix | resolve `brew --prefix` once; fall back to `/opt/homebrew`/`/usr/local` |
+| Caskroom match ambiguity | match exact Caskroom/<name> + Cellar/<name>; do not fuzzy glob whole prefix |
+| Helpers name drift | match vendor prefix + bundle-id-derived names; no brand list |
+| Never touch kext/BTM/login | exclude from delete set; render as `—` |
 
-## Open questions
+## Out of scope
 
-None that block Task 1. Default: no disk cache for profiler.
-
-## Parallelization
-
-- Tasks 1–2 share `disk_analyzer.py` — serialize.
-- Tasks 3–4 share `app_uninstaller.py` — serialize.
-- Task 5 (`bba.py`) can follow Task 3 (orphans uses both).
-- Task 6 after disk tasks.
-
-## Verification (plan-level)
-
-- Every task has a re-measure step with the same command as the baseline
-- Neutral result = revert
-- Human approves before implementation
+kext, BTM/slogin items, Keychain, TCC, per-app brand maps.

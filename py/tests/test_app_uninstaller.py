@@ -18,6 +18,8 @@ def fake_home(tmp_path, monkeypatch):
     (home / "Library").mkdir(parents=True)
     monkeypatch.setenv("CLEANMAC_HOME", str(home))
     monkeypatch.setattr(au, "APP_DIRS", [str(home / "Applications")])
+    # isolate Homebrew scan so tests don't see the host Caskroom
+    monkeypatch.setattr(au, "_brew_prefix", lambda: "")
 
     # fake app bundle (inside the sandbox home so is_safe_path allows it)
     apps = home / "Applications"
