@@ -435,6 +435,36 @@ def _build_fingerprint_for_target(target) -> dict:
     return fp
 
 
+def _matrix_has_leftovers(matrix: dict[str, str]) -> bool:
+    """True if a matrix has any cleanable leftover category set to Y.
+
+    The `app` bundle and `mas` columns don't count (always Y for an
+    installed app — the bundle is what you're removing, not a leftover).
+    kext/btm are never addressable.
+    """
+    cleanable = (
+        "pkg", "brew", "support", "cache", "prefs", "container",
+        "saved", "agents", "daemons", "helpers",
+    )
+    return any(matrix.get(c) == "Y" for c in cleanable)
+
+
+def _has_cleanable_leftovers(app: AppInfo) -> bool:
+    """True if an installed app has any cleanable leftover beyond its bundle.
+
+    Builds the app's matrix and checks whether any leftover category is Y.
+    """
+    target = UninstallTarget(
+        name=app.name,
+        bundle_id=app.bundle_id,
+        path=app.path,
+        app_installed=True,
+        query=app.name,
+    )
+    fp = _build_fingerprint_for_target(target)
+    return _matrix_has_leftovers(_build_matrix(target, fp))
+
+
 def _is_system_launch(path: str) -> bool:
     return "LaunchDaemons" in path or path.startswith("/Library/LaunchAgents")
 
@@ -1193,7 +1223,7 @@ def _pick_app_interactive(reporter: Reporter) -> str | None:
     cancel. Redraws only a small window of rows — never clears the whole
     screen. stdlib termios/tty only.
     """
-    apps = list_apps()
+    apps = [a for a in list_apps() if _has_cleanable_leftovers(a)]
     if not apps:
         reporter.warn("no_apps_installed")
         return None

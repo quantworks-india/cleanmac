@@ -69,6 +69,28 @@ def test_list_apps_includes_brew_cask_bundles(tmp_path, monkeypatch):
     assert any("Caskroom" in a.path for a in apps)
 
 
+def test_has_leftovers_matrix_category():
+    """An app 'has leftovers' only when a cleanable category is Y — the app
+    bundle and mas columns don't count (always Y for an installed app)."""
+    # App bundle + mas only -> nothing to clean beyond the bundle itself
+    only_bundle = {
+        "app": "Y", "mas": "Y", "pkg": "N", "brew": "N", "support": "N",
+        "cache": "N", "prefs": "N", "container": "N", "saved": "N",
+        "agents": "N", "daemons": "N", "helpers": "N", "kext": "—", "btm": "—",
+    }
+    assert au._matrix_has_leftovers(only_bundle) is False
+
+    # Any cleanable leftover category set -> True
+    with_leftover = dict(only_bundle, support="Y")
+    assert au._matrix_has_leftovers(with_leftover) is True
+
+    # helpers / daemons / brew also count
+    assert au._matrix_has_leftovers(dict(only_bundle, helpers="Y")) is True
+    assert au._matrix_has_leftovers(dict(only_bundle, daemons="Y")) is True
+    assert au._matrix_has_leftovers(dict(only_bundle, brew="Y")) is True
+    assert au._matrix_has_leftovers(dict(only_bundle, pkg="Y")) is True
+
+
 def test_brew_paths_matches_cask_and_cellar(tmp_path, monkeypatch):
     """Returns both the Caskroom app and the matching Cellar formula."""
     _fake_brew(tmp_path, monkeypatch, casks=["myapp", "other"], cellars=["myapp"])
