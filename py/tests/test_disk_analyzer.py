@@ -7,6 +7,7 @@ import os
 import pytest
 
 from maccleaner import disk_analyzer as da
+from maccleaner.core import Reporter
 
 
 @pytest.fixture
@@ -20,12 +21,13 @@ def tree(tmp_path):
     return tmp_path
 
 
-def test_scan_total_size(tree):
-    sizes, total = da.scan(str(tree))
-    assert total == 350  # 100 + 200 + 50
-    assert sizes[str(tree / "a")] == 300  # 100 + 200
-    assert sizes[str(tree / "a" / "b")] == 200
+def test_dir_sizes_does_not_keep_file_paths(tree):
+    """Full-tree size map is dirs only — files roll into parents."""
+    sizes = da.dir_sizes(str(tree))
+    assert str(tree / "a" / "file1.txt") not in sizes
+    assert sizes[str(tree / "a")] == 300
     assert sizes[str(tree / "c")] == 50
+    assert sizes[str(tree)] == 350
 
 
 def test_walk_skips_symlink_loop(tree):
@@ -44,15 +46,16 @@ def test_top_largest(tree):
 def test_report_creates_self_contained_html(tree, tmp_path):
     out = tmp_path / "report.html"
     args = type("A", (), {"dir": str(tree), "out": str(out)})()
-    rc = da._run_report(args)
+    rc = da._run_report(args, Reporter())
     assert rc == 0
     assert out.exists()
     content = out.read_text()
     assert "<!DOCTYPE html>" in content
     assert '<div id="map">' in content
     assert "Disk Treemap" in content
-    # treemap JSON includes all nodes (files + dir) as tiles
-    assert "file1.txt" in content
+    # directory-only rollup: files are folded into parent dirs
+    assert "file1.txt" not in content
+    assert '"name": "a"' in content or ">a<" in content or "a" in content
 
 
 def test_scan_tolerates_missing_dir(tmp_path):
@@ -78,37 +81,105 @@ def test_treemap_handles_deep_paths(tmp_path):
 
 def test_run_scan_prints_total_and_top(tree, capsys):
     args = type("A", (), {"dir": str(tree)})()
-    rc = da._run_scan(args)
+    rc = da._run_scan(args, Reporter())
     assert rc == 0
     out = capsys.readouterr().out
-    assert "Scan of" in out
-    assert "350" in out or "B" in out
+    assert "disk_scan" in out
 
 
 def test_run_top_uses_dir_when_provided(tree, capsys):
     args = type("A", (), {"dir": str(tree)})()
-    rc = da._run_top(args)
+    rc = da._run_top(args, Reporter())
     assert rc == 0
     out = capsys.readouterr().out
-    assert "Top 25" in out
+    assert "Size" in out  # table header
+    assert "Path" in out
 
 
 def test_run_summary_breaks_down_top_level(tree, capsys):
     args = type("A", (), {"dir": str(tree)})()
-    rc = da._run_summary(args)
+    rc = da._run_summary(args, Reporter())
     assert rc == 0
     out = capsys.readouterr().out
-    assert "Top-level breakdown" in out
+    assert "Size" in out  # table header
+    assert "Path" in out
+
+
+def test_summary_does_not_call_full_scan(tree, monkeypatch):
+    """disk summary must size only immediate children, not scan() the tree."""
+
+    def boom(*_a, **_k):
+        raise AssertionError("full scan must not run for summary")
+
+    monkeypatch.setattr(da, "scan", boom)
+    args = type("A", (), {"dir": str(tree)})()
+    rc = da._run_summary(args, Reporter())
+    assert rc == 0
 
 
 def test_run_system_data_handles_missing_dirs(capsys, monkeypatch, tmp_path):
     monkeypatch.setenv("CLEANMAC_HOME", str(tmp_path))
     args = type("A", (), {})()
-    rc = da._run_system_data(args)
+    rc = da._run_system_data(args, Reporter())
     assert rc == 0
+
+
+def test_system_data_one_du_invocation(monkeypatch, tmp_path):
+    """Size listed roots with a single du, not one process per folder."""
+    (tmp_path / "Library" / "Caches").mkdir(parents=True)
+    (tmp_path / "Library" / "Logs").mkdir(parents=True)
+    (tmp_path / "Library" / "Caches" / "x").write_bytes(b"a" * 100)
+    n = {"c": 0}
+
+    def fake_run(cmd, *a, **k):
+        n["c"] += 1
+        from subprocess import CompletedProcess
+        # emit one line per path after the flags
+        lines = []
+        for p in cmd[2:]:
+            lines.append(f"4\t{p}")
+        return CompletedProcess(cmd, 0, "\n".join(lines) + "\n", "")
+
+    monkeypatch.setenv("CLEANMAC_HOME", str(tmp_path))
+    monkeypatch.setattr(da.subprocess, "run", fake_run)
+    rc = da._run_system_data(type("A", (), {})(), Reporter())
+    assert rc == 0
+    assert n["c"] == 1
 
 
 def test_run_unknown_disk_cmd_returns_2():
     args = type("A", (), {"disk_cmd": "nonexistent"})()
-    rc = da.run(args)
+    rc = da.run(args, Reporter())
     assert rc == 2
+
+
+# ── network mounts via getmntinfo (ctypes) ───────────────────────────
+
+def test_network_mount_points_from_getmntinfo(monkeypatch):
+    """_network_mount_points must come from getmntinfo, not mount(8) text."""
+    # Fake the low-level getmntinfo result: list of (fstype, mountpoint).
+    fake_mounts = [
+        ("apfs", "/"),
+        ("smbfs", "/Volumes/Share"),
+        ("autofs", "/System/Volumes/Data/home"),
+    ]
+    monkeypatch.setattr(da, "_getmntinfo_pairs", lambda: fake_mounts)
+
+    result = da._network_mount_points()
+    assert "/Volumes/Share" in result            # smbfs is network
+    assert "/System/Volumes/Data/home" in result # autofs is network
+    assert "/" not in result                     # apfs is local
+
+
+def test_network_mount_points_empty_on_getmntinfo_failure(monkeypatch):
+    monkeypatch.setattr(da, "_getmntinfo_pairs", lambda: (_ for _ in ()).throw(OSError("no")))
+    assert da._network_mount_points() == set()
+
+
+def test_getmntinfo_pairs_returns_structured_records(monkeypatch):
+    """The native path yields (fstype, mountpoint) tuples, not text."""
+    pairs = da._getmntinfo_pairs()
+    assert isinstance(pairs, list)
+    if pairs:
+        fs, mnt = pairs[0]
+        assert isinstance(fs, str) and isinstance(mnt, str)

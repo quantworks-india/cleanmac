@@ -9,7 +9,7 @@ import pytest
 
 from maccleaner import core
 from maccleaner import duplicates as dup
-from maccleaner.core import Auditor, Deleter
+from maccleaner.core import Auditor, Deleter, Reporter
 
 
 @pytest.fixture(autouse=True)
@@ -42,7 +42,7 @@ def test_scan_finds_identical_files(isolated_home, capsys):
 
     aud = Auditor("scan1", mode="dry-run")
     deleter = Deleter(aud, commit=False)
-    rc = dup.run(_scan_args(str(d)), deleter)
+    rc = dup.run(_scan_args(str(d)), deleter, Reporter())
     assert rc == 0
     out = capsys.readouterr().out
     assert "a.txt" in out
@@ -60,10 +60,11 @@ def test_scan_ignores_different_files(isolated_home, capsys):
 
     aud = Auditor("scan2", mode="dry-run")
     deleter = Deleter(aud, commit=False)
-    rc = dup.run(_scan_args(str(d)), deleter)
+    rc = dup.run(_scan_args(str(d)), deleter, Reporter())
     assert rc == 0
     out = capsys.readouterr().out
-    assert "0 duplicate groups" in out
+    assert "dup_scan_complete" in out
+    assert "groups=0" in out
     aud.close()
 
 
@@ -77,7 +78,7 @@ def test_scan_respects_min_size(isolated_home, capsys):
 
     aud = Auditor("scan3", mode="dry-run")
     deleter = Deleter(aud, commit=False)
-    dup.run(_scan_args(str(d), min_size="100B"), deleter)
+    dup.run(_scan_args(str(d), min_size="100B"), deleter, Reporter())
     out = capsys.readouterr().out
     assert "large1" in out
     assert "large2" in out
@@ -94,9 +95,10 @@ def test_scan_skips_hard_links(isolated_home, capsys):
 
     aud = Auditor("scan4", mode="dry-run")
     deleter = Deleter(aud, commit=False)
-    dup.run(_scan_args(str(d)), deleter)
+    dup.run(_scan_args(str(d)), deleter, Reporter())
     out = capsys.readouterr().out
-    assert "0 duplicate groups" in out
+    assert "dup_scan_complete" in out
+    assert "groups=0" in out
     aud.close()
 
 
@@ -108,9 +110,10 @@ def test_scan_skips_symlinks(isolated_home, capsys):
 
     aud = Auditor("scan5", mode="dry-run")
     deleter = Deleter(aud, commit=False)
-    dup.run(_scan_args(str(d)), deleter)
+    dup.run(_scan_args(str(d)), deleter, Reporter())
     out = capsys.readouterr().out
-    assert "0 duplicate groups" in out
+    assert "dup_scan_complete" in out
+    assert "groups=0" in out
     aud.close()
 
 
@@ -122,7 +125,7 @@ def test_scan_dry_run_deletes_nothing(isolated_home):
 
     aud = Auditor("scan6", mode="dry-run")
     deleter = Deleter(aud, commit=False)
-    rc = dup.run(_scan_args(str(d)), deleter)
+    rc = dup.run(_scan_args(str(d)), deleter, Reporter())
     assert rc == 0
     assert (d / "a.txt").exists()
     assert (d / "b.txt").exists()
@@ -139,7 +142,7 @@ def test_scan_commit_deletes_redundant(isolated_home):
 
     aud = Auditor("scan7", mode="live")
     deleter = Deleter(aud, commit=True, confirm_fn=lambda p: True)
-    rc = dup.run(_scan_args(str(d)), deleter)
+    rc = dup.run(_scan_args(str(d)), deleter, Reporter())
     assert rc == 0
     assert (d / "keep.txt").exists()
     assert not (d / "dup.txt").exists()
@@ -161,7 +164,7 @@ def test_merge_folders_moves_and_reports_conflicts(isolated_home, capsys):
     args = type("A", (), {"dup_cmd": "merge-folders", "a": str(a), "b": str(b)})()
     aud = Auditor("merge1", mode="live")
     deleter = Deleter(aud, commit=True, confirm_fn=lambda p: True)
-    rc = dup.run(args, deleter)
+    rc = dup.run(args, deleter, Reporter())
     assert rc == 0
 
     assert (a / "new.txt").exists()
@@ -183,7 +186,7 @@ def test_merge_folders_nested_subdirs(isolated_home):
     args = type("A", (), {"dup_cmd": "merge-folders", "a": str(a), "b": str(b)})()
     aud = Auditor("merge2", mode="live")
     deleter = Deleter(aud, commit=True, confirm_fn=lambda p: True)
-    rc = dup.run(args, deleter)
+    rc = dup.run(args, deleter, Reporter())
     assert rc == 0
     assert (a / "sub" / "deep.txt").exists()
     aud.close()
@@ -222,7 +225,7 @@ def test_similar_photos_groups_similar(isolated_home, capsys):
     args = type("A", (), {"dup_cmd": "similar-photos", "dir": str(d)})()
     aud = Auditor("photos1", mode="dry-run")
     deleter = Deleter(aud, commit=False)
-    rc = dup.run(args, deleter)
+    rc = dup.run(args, deleter, Reporter())
     assert rc == 0
     out = capsys.readouterr().out
     assert "img1" in out
@@ -249,7 +252,7 @@ def test_scan_reuses_stat_from_walk(isolated_home, monkeypatch):
 
     aud = Auditor("scan-stat", mode="dry-run")
     deleter = Deleter(aud, commit=False)
-    rc = dup.run(_scan_args(str(d)), deleter)
+    rc = dup.run(_scan_args(str(d)), deleter, Reporter())
     assert rc == 0
     aud.close()
 

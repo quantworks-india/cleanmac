@@ -10,7 +10,7 @@ import argparse
 import time
 
 from maccleaner import __version__
-from maccleaner.core import LOG_DIR, Auditor, Deleter, Sudo
+from maccleaner.core import LOG_DIR, Auditor, Deleter, Reporter, Sudo
 
 RUN_ID = time.strftime("%Y%m%d-%H%M%S")
 
@@ -32,7 +32,29 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Actually delete. Without this, nothing is removed.",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit structured JSON events to stdout (one per line).",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print debug-level details (file-by-file progress, counters).",
+    )
     sub = parser.add_subparsers(dest="tool", required=True)
+
+    # ── uninstall ───────────────────────────────────────────────────
+    # The one product surface this pass. `cleanmac uninstall [target]`.
+    uni = sub.add_parser(
+        "uninstall",
+        help="Remove an app and every leftover it leaves behind",
+    )
+    uni.add_argument(
+        "target",
+        nargs="?",
+        help="App name or bundle id (omit for the interactive picker)",
+    )
 
     # ── app ─────────────────────────────────────────────────────────
     app = sub.add_parser("app", help="App Cleaner & Uninstaller")
@@ -41,11 +63,29 @@ def _build_parser() -> argparse.ArgumentParser:
     rem = app_sub.add_parser("remove", help="Remove an app and its leftovers")
     rem.add_argument("app", help="App name or bundle id")
     rem.add_argument("--force", action="store_true", help="Allow short/dangerous names")
+    uni = app_sub.add_parser("uninstall", help="Deep uninstall: app + leftovers + launch agents (interactive picker)")
+    uni.add_argument("--name", help="App name or bundle id (skip interactive picker)")
+    uni.add_argument("--yes", action="store_true", help="Skip confirmation prompts (with --commit)")
+    uni.add_argument("--force", action="store_true", help="Allow short/dangerous names")
+    rembyid = app_sub.add_parser("purge-by-id", help="Wipe leftovers of an already-uninstalled app by bundle id")
+    rembyid.add_argument("bundle", help="Bundle id, e.g. com.microsoft.VSCode")
+    rembyid.add_argument("--yes", action="store_true", help="Skip confirmation prompts (with --commit)")
     rst = app_sub.add_parser("reset", help="Reset app settings (keeps app)")
     rst.add_argument("app", help="App name or bundle id")
     st = app_sub.add_parser("startup", help="Manage startup programs")
     st.add_argument("action", choices=["list", "disable"])
     st.add_argument("label", nargs="?", help="LaunchAgent label to disable")
+    st.add_argument("--orphans-only", action="store_true", help="Show only orphaned items (agents from uninstalled apps)")
+    orp = app_sub.add_parser("orphans", help="List/purge orphaned background agents from uninstalled apps")
+    orp_sub = orp.add_subparsers(dest="orphans_action", required=True)
+    orp_sub.add_parser("list", help="List orphaned LaunchAgents/LaunchDaemons (dry)")
+    pp = orp_sub.add_parser("purge", help="Bootout + quarantine orphaned launch items")
+    pp.add_argument("--yes", action="store_true", help="Skip per-item confirmation (only used with --commit)")
+    bba = app_sub.add_parser("bba", help="Background App Activity: items sfltool dumpbtm reports as orphaned")
+    bba_sub = bba.add_subparsers(dest="bba_action", required=True)
+    bba_sub.add_parser("list", help="List BAA items whose app/daemon is uninstalled (dry)")
+    pb = bba_sub.add_parser("purge", help="Bootout + quarantine BAA orphans")
+    pb.add_argument("--yes", action="store_true", help="Skip per-item confirmation (only used with --commit)")
     app_sub.add_parser("extensions", help="List browser extensions")
     app_sub.add_parser("update", help="Check for outdated apps (mas/brew)")
 
@@ -94,51 +134,80 @@ def main(argv: list[str] | None = None) -> int:
     auditor = Auditor(RUN_ID, mode=mode)
     deleter = Deleter(auditor, commit=args.commit)
     sudo = Sudo()
+    reporter = Reporter(json_mode=args.json, verbose=args.verbose)
+
+    # Validate sudo once up front when committing. This means at most ONE
+    # password prompt for the entire invocation regardless of how many
+    # sub-commands end up touching /Library. The stamp lasts ~5 min by default.
+    if args.commit and _needs_sudo(args):
+        sudo.ensure()
 
     try:
+        if args.tool == "uninstall":
+            return _run_uninstall(args, deleter, sudo, reporter)
         if args.tool == "app":
-            return _run_app(args, deleter, sudo)
+            return _run_app(args, deleter, sudo, reporter)
         if args.tool == "dup":
-            return _run_dup(args, deleter)
+            return _run_dup(args, deleter, reporter)
         if args.tool == "disk":
-            return _run_disk(args)
+            return _run_disk(args, reporter)
         if args.tool == "mem":
-            return _run_mem(args, sudo)
+            return _run_mem(args, sudo, reporter)
         if args.tool == "hidden":
-            return _run_hidden(args)
+            return _run_hidden(args, reporter)
         return 2
     finally:
         auditor.close()
 
 
-def _run_app(args, deleter: Deleter, sudo: Sudo) -> int:
+def _needs_sudo(args) -> bool:
+    """True if this invocation may touch system-scope paths (LaunchDaemons,
+    PrivilegedHelperTools, /Library state, etc.) — i.e. needs sudo at least
+    once during execution.
+    """
+    if args.tool == "mem":
+        return args.mem_cmd == "free"
+    if args.tool == "app":
+        # Any app command that may remove system-scope items.
+        if getattr(args, "app_cmd", None) in ("remove", "startup", "orphans", "bba"):
+            return True
+    return False
+
+
+def _run_app(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
     from maccleaner import app_uninstaller
 
-    return app_uninstaller.run(args, deleter, sudo)
+    return app_uninstaller.run(args, deleter, sudo, reporter)
 
 
-def _run_dup(args, deleter: Deleter) -> int:
+def _run_uninstall(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
+    from maccleaner import uninstall as uninstall_mod
+
+    return uninstall_mod.run(args, deleter, sudo, reporter)
+
+
+def _run_dup(args, deleter: Deleter, reporter: Reporter) -> int:
     from maccleaner import duplicates
 
-    return duplicates.run(args, deleter)
+    return duplicates.run(args, deleter, reporter)
 
 
-def _run_disk(args) -> int:
+def _run_disk(args, reporter: Reporter) -> int:
     from maccleaner import disk_analyzer
 
-    return disk_analyzer.run(args)
+    return disk_analyzer.run(args, reporter)
 
 
-def _run_mem(args, sudo: Sudo) -> int:
+def _run_mem(args, sudo: Sudo, reporter: Reporter) -> int:
     from maccleaner import memory
 
-    return memory.run(args, sudo)
+    return memory.run(args, sudo, reporter)
 
 
-def _run_hidden(args) -> int:
+def _run_hidden(args, reporter: Reporter) -> int:
     from maccleaner import hidden_files
 
-    return hidden_files.run(args)
+    return hidden_files.run(args, reporter)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -90,3 +91,48 @@ def test_main_propagates_module_return_code():
     with patch("maccleaner.hidden_files.run", return_value=7):
         rc = cli.main(["--dry-run", "hidden", "show"])
     assert rc == 7
+
+
+# ── observability flags ─────────────────────────────────────────────
+
+
+def test_cli_json_flag_propagates_to_subcommand(capsys, monkeypatch):
+    """When --json is passed, the Reporter on the subcommand module is in json_mode."""
+    captured: dict[str, object] = {}
+
+    def fake_run(args, reporter):
+        captured["reporter"] = reporter
+        reporter.info("hello", n=1)
+        return 0
+
+    monkeypatch.setattr(cli, "_run_hidden", fake_run)
+    rc = cli.main(["--json", "hidden", "show"])
+    assert rc == 0
+    assert captured["reporter"].json_mode is True
+    out = capsys.readouterr().out
+    recs = [json.loads(line) for line in out.strip().splitlines()]
+    assert any(r["event"] == "hello" for r in recs)
+
+
+def test_cli_verbose_flag_passed_through(monkeypatch):
+    captured: dict[str, bool] = {}
+
+    def fake_run(args, reporter):
+        captured["verbose"] = reporter.verbose
+        return 0
+
+    monkeypatch.setattr(cli, "_run_hidden", fake_run)
+    cli.main(["--verbose", "hidden", "show"])
+    assert captured["verbose"] is True
+
+
+def test_cli_no_verbose_by_default(monkeypatch):
+    captured: dict[str, bool] = {}
+
+    def fake_run(args, reporter):
+        captured["verbose"] = reporter.verbose
+        return 0
+
+    monkeypatch.setattr(cli, "_run_hidden", fake_run)
+    cli.main(["hidden", "show"])
+    assert captured["verbose"] is False

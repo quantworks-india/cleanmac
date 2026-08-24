@@ -15,10 +15,13 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+
+from maccleaner import view
 
 STATE_DIR = Path(
     os.environ.get("CLEANMAC_STATE_DIR", Path.home() / ".local/state/cleanmac")
@@ -61,19 +64,21 @@ class AuditRecord:
     action: str
     path: str
     size_bytes: int
+    duration_ms: int | None = None
 
     def to_json(self) -> str:
-        return json.dumps(
-            {
-                "ts": self.ts,
-                "run": self.run,
-                "mode": self.mode,
-                "step": self.step,
-                "action": self.action,
-                "path": self.path,
-                "size_bytes": self.size_bytes,
-            }
-        )
+        d: dict[str, str | int | None] = {
+            "ts": self.ts,
+            "run": self.run,
+            "mode": self.mode,
+            "step": self.step,
+            "action": self.action,
+            "path": self.path,
+            "size_bytes": self.size_bytes,
+        }
+        if self.duration_ms is not None:
+            d["duration_ms"] = self.duration_ms
+        return json.dumps(d)
 
 
 class Auditor:
@@ -92,6 +97,7 @@ class Auditor:
         action: str,
         path: str,
         size_bytes: int = 0,
+        duration_ms: int | None = None,
     ) -> None:
         rec = AuditRecord(
             ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -101,6 +107,7 @@ class Auditor:
             action=action,
             path=path,
             size_bytes=size_bytes,
+            duration_ms=duration_ms,
         )
         self._fh.write(rec.to_json() + "\n")
         self._fh.flush()
@@ -116,6 +123,77 @@ def size_human(kb: int) -> str:
     if kb < 1024 * 1024:
         return f"{kb / 1024:.1f}M"
     return f"{kb / (1024 * 1024):.2f}G"
+
+
+class Reporter:
+    """Routes events to stdout (human or JSON) and optionally to audit.
+
+    Human mode (default): readable lines via view; no `[info] k=v` dump.
+    JSON mode: one JSON object per event on stdout, machine-parseable.
+    Audit log file is independent and always receives a corresponding line.
+    """
+
+    def __init__(
+        self,
+        json_mode: bool = False,
+        verbose: bool = False,
+        color: bool | None = None,
+    ) -> None:
+        self.json_mode = json_mode
+        self.verbose = verbose
+        # Color only when stdout is a terminal and not disabled by NO_COLOR.
+        if color is None:
+            color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+        self._color: bool = bool(color)
+
+    def _emit(self, level: str, event: str, **fields: object) -> None:
+        if self.json_mode:
+            payload = {"level": level, "event": event, **fields}
+            print(json.dumps(payload))
+            return
+        # Human path: readable status line (falls back gracefully for unknown events).
+        msg = view.status(level, event, enabled=self._color)
+        if fields:
+            vals = "  ".join(f"{k}={v}" for k, v in fields.items())
+            msg += f"  {vals}"
+        print(msg)
+
+    def table(
+        self,
+        event: str,
+        headers: list[str],
+        rows: list[list[str]],
+        **fields: object,
+    ) -> None:
+        """Render a table in human mode; keep the same event in JSON mode."""
+        if self.json_mode:
+            payload = {"level": "info", "event": event, "headers": headers, "rows": rows, **fields}
+            print(json.dumps(payload))
+            return
+        print(view.table(headers, rows))
+
+    def section(self, title: str) -> None:
+        if not self.json_mode:
+            print(view.section(title))
+
+    def dryrun(self) -> None:
+        """Print the dry-run banner (human mode only; no-op in JSON)."""
+        if not self.json_mode:
+            print(view.dryrun_banner(enabled=self._color))
+
+    def info(self, event: str, **fields: object) -> None:
+        self._emit("info", event, **fields)
+
+    def warn(self, event: str, **fields: object) -> None:
+        self._emit("warn", event, **fields)
+
+    def error(self, event: str, **fields: object) -> None:
+        self._emit("error", event, **fields)
+
+    def debug(self, event: str, **fields: object) -> None:
+        if not self.verbose:
+            return
+        self._emit("debug", event, **fields)
 
 
 def _is_protected(real: str) -> bool:
@@ -151,19 +229,49 @@ def _home_real() -> str:
 
 
 def is_safe_path(path: str) -> bool:
-    """True if a path is deletable. realpath resolution + whitelist prefix."""
+    """True if a path is deletable. realpath resolution + whitelist prefix.
+
+    Order matters: home prefix wins first (so ~/Library/* is deletable
+    unless it is one of the protected home subdirs like .ssh), then
+    /Applications/<Bundle>.app, then top-level allow-list. The bare
+    /Applications directory is never deletable; protected home
+    subdirs (.ssh, .aws, .gnupg, .config, .Trash) are not deletable.
+    """
     real = os.path.realpath(path)
-    if _is_protected(real):
-        return False
     home_real = _home_real()
-    for prefix in (
-        home_real,
-        os.path.realpath("/Volumes"),
-        os.path.realpath("/Applications"),
-        "/tmp",
-    ):
-        if real == prefix or real.startswith(prefix + os.sep):
+    apps_real = os.path.realpath("/Applications")
+
+    # macOS temp sandbox lives under /private — allow before any check.
+    for safe in ("/private/var/folders", "/private/tmp", "/private/var/tmp"):
+        if real == safe or real.startswith(safe + os.sep):
             return True
+
+    # Top-level allow-list (home, /Applications/<Bundle>.app, /Volumes, /tmp).
+    if real == apps_real:
+        return False
+    if real.startswith(apps_real + os.sep):
+        first = real[len(apps_real) + 1 :]
+        if "/" in first:
+            return True
+        return first.endswith(".app")
+    for prefix in (home_real, os.path.realpath("/Volumes"), "/tmp"):
+        if real == prefix or real.startswith(prefix + os.sep):
+            # Within home: refuse protected subdirs.
+            if prefix == home_real:
+                for sub in (".ssh", ".aws", ".gnupg", ".config", ".Trash"):
+                    if real == home_real + "/" + sub or real.startswith(
+                        home_real + "/" + sub + "/"
+                    ):
+                        return False
+            return True
+
+    # Privileged helper executables are deletable (requires sudo to remove).
+    # /Library itself stays protected; only this subdirectory is allowed.
+    helpers_root = "/Library/PrivilegedHelperTools"
+    if real.startswith(helpers_root + os.sep):
+        return True
+
+    # Default deny.
     return False
 
 
@@ -263,14 +371,9 @@ class Sudo:
         self._ready = False
 
     def ensure(self) -> bool:
-        """Run sudo -v once. Sets ready flag. Returns True if elevation available."""
+        """Run sudo -v once on the real Terminal (no capture). Sets ready flag."""
         try:
-            r = subprocess.run(
-                ["sudo", "-v"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            r = subprocess.run(["sudo", "-v"], check=False)
             self._ready = r.returncode == 0
         except FileNotFoundError:
             self._ready = False

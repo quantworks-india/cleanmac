@@ -10,10 +10,12 @@ import glob
 import os
 import plistlib
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from maccleaner.core import Deleter, Sudo, dir_size_kb, is_safe_path
+from maccleaner import view
+from maccleaner.core import Deleter, Reporter, Sudo, dir_size_kb, is_safe_path
 
 APP_DIRS = ["/Applications", str(Path.home() / "Applications")]
 
@@ -59,6 +61,90 @@ class AppInfo:
     size_kb: int
 
 
+@dataclass
+class UninstallTarget:
+    """What we are removing. A live .app, leftover-only, or a name/id.
+
+    ``app_installed`` is False when the bundle is already gone but the
+    target still resolves by name or bundle id for leftover cleanup.
+    """
+
+    name: str
+    bundle_id: str | None
+    path: str  # empty "" when the .app is no longer present
+    app_installed: bool
+    query: str
+
+
+def _scan_apps_in(directory: str) -> list[AppInfo]:
+    """List .app bundles directly under ``directory`` (does not recurse)."""
+    apps: list[AppInfo] = []
+    if not os.path.isdir(directory):
+        return apps
+    for entry in os.scandir(directory):
+        if not entry.name.endswith(".app") or not entry.is_dir():
+            continue
+        name, bundle = _parse_info_plist(entry.path)
+        apps.append(
+            AppInfo(
+                name=name or entry.name[:-4],
+                bundle_id=bundle,
+                path=entry.path,
+                version=None,
+                size_kb=0,
+            )
+        )
+    return apps
+
+
+def _candidate_dirs() -> list[str]:
+    """Directories to scan for installed apps (respects CLEANMAC_HOME)."""
+    home = os.environ.get("CLEANMAC_HOME") or str(Path.home())
+    return ["/Applications", os.path.join(home, "Applications")]
+
+
+def resolve(query: str) -> UninstallTarget:
+    """Resolve a name or bundle id to an uninstall target.
+
+    Matches display name, bundle id, and .app basename. If no live app
+    matches but the query itself is a plausible name/bundle, returns a
+    leftover-only target so cleanup can still run.
+    """
+    q = query.strip()
+    if not q:
+        raise SystemExit("Uninstall needs an app name or bundle id.")
+
+    apps: list[AppInfo] = []
+    for d in _candidate_dirs():
+        apps.extend(_scan_apps_in(d))
+
+    lowered = q.lower()
+    for a in apps:
+        if (
+            a.name.lower() == lowered
+            or (a.bundle_id and a.bundle_id.lower() == lowered)
+            or os.path.splitext(os.path.basename(a.path))[0].lower() == lowered
+        ):
+            return UninstallTarget(
+                name=a.name,
+                bundle_id=a.bundle_id,
+                path=a.path,
+                app_installed=True,
+                query=q,
+            )
+
+    # No live app: leftover-only target. Bundle id if it looks like one,
+    # otherwise treat the query as a display/name hint.
+    looks_like_bundle = "." in q
+    return UninstallTarget(
+        name=q,
+        bundle_id=q if looks_like_bundle else None,
+        path="",
+        app_installed=False,
+        query=q,
+    )
+
+
 def _parse_info_plist(app_path: str) -> tuple[str | None, str | None]:
     plist = os.path.join(app_path, "Contents", "Info.plist")
     try:
@@ -71,14 +157,39 @@ def _parse_info_plist(app_path: str) -> tuple[str | None, str | None]:
         return None, None
 
 
-def list_apps() -> list[AppInfo]:
+def _caskroom_bundles(prefix: str) -> list[tuple[str, str]]:
+    """Find .app bundles inside a Homebrew Caskroom.
+
+    Cask bundles are nested: <prefix>/Caskroom/<cask>/<version>/<Name>.app.
+    Returns (path, name) pairs.
+    """
+    room = os.path.join(prefix, "Caskroom")
+    out: list[tuple[str, str]] = []
+    if not os.path.isdir(room):
+        return out
+    for cask in os.listdir(room):
+        base = os.path.join(room, cask)
+        if not os.path.isdir(base):
+            continue
+        for root, dirs, files in os.walk(base):
+            for d in dirs:
+                if d.endswith(".app"):
+                    out.append((os.path.join(root, d), d[:-4]))
+    return out
+
+
+def list_apps(*, include_size: bool = False) -> list[AppInfo]:
     apps: list[AppInfo] = []
+    seen: set[str] = set()
     for d in APP_DIRS:
         if not os.path.isdir(d):
             continue
         for entry in os.scandir(d):
             if not entry.name.endswith(".app") or not entry.is_dir():
                 continue
+            if entry.path in seen:
+                continue
+            seen.add(entry.path)
             name, bundle = _parse_info_plist(entry.path)
             apps.append(
                 AppInfo(
@@ -86,9 +197,25 @@ def list_apps() -> list[AppInfo]:
                     bundle_id=bundle,
                     path=entry.path,
                     version=None,
-                    size_kb=dir_size_kb(entry.path),
+                    size_kb=dir_size_kb(entry.path) if include_size else 0,
                 )
             )
+    # Brew casks may not have a live /Applications symlink.
+    prefix = _brew_prefix()
+    for path, _n in _caskroom_bundles(prefix):
+        if path in seen:
+            continue
+        seen.add(path)
+        name, bundle = _parse_info_plist(path)
+        apps.append(
+            AppInfo(
+                name=name or _n,
+                bundle_id=bundle,
+                path=path,
+                version=None,
+                size_kb=dir_size_kb(path) if include_size else 0,
+            )
+        )
     return sorted(apps, key=lambda a: a.name.lower())
 
 
@@ -152,26 +279,463 @@ def _system_paths(app: AppInfo) -> list[str]:
     return sorted(set(found))
 
 
-def _run_remove(args, deleter: Deleter, sudo: Sudo) -> int:
+def _vendor_prefix(bundle_id: str) -> str:
+    """First two reverse-DNS labels, e.g. us.zoom.xos → 'us.zoom.'."""
+    parts = (bundle_id or "").lower().split(".")
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        return ""
+    return f"{parts[0]}.{parts[1]}."
+
+
+def _brew_prefix() -> str:
+    """Homebrew install prefix. Empty if brew isn't installed."""
+    env = os.environ.get("CLEANMAC_BREW_PREFIX")
+    if env:
+        return env
+    for cand in ("/opt/homebrew", "/usr/local"):
+        if os.path.isdir(cand):
+            return cand
+    try:
+        r = subprocess.run(
+            ["brew", "--prefix"], capture_output=True, text=True, check=False
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except (OSError, FileNotFoundError):
+        pass
+    return ""
+
+
+def brew_paths(bundle_id: str, name: str) -> list[str]:
+    """Homebrew leftovers: the Caskroom cask and Cellar formula, if present."""
+    prefix = _brew_prefix()
+    if not prefix:
+        return []
+    found: list[str] = []
+    basename = name.split(".")[-1].lower() if name else ""
+    for sub in ("Caskroom", "Cellar"):
+        d = os.path.join(prefix, sub)
+        if not os.path.isdir(d):
+            continue
+        candidates = {name.lower(), basename}
+        if bundle_id:
+            candidates.add(bundle_id.split(".")[-1].lower())
+        candidates.discard("")
+        for candidate in candidates:
+            p = os.path.join(d, candidate)
+            if os.path.isdir(p):
+                found.append(p)
+    return sorted(set(found))
+
+
+def _helper_dir() -> str:
+    """Directory holding privileged helper executables."""
+    env = os.environ.get("CLEANMAC_HELPERS_DIR")
+    if env:
+        return env
+    return "/Library/PrivilegedHelperTools"
+
+
+def helper_paths(bundle_id: str, name: str) -> list[str]:
+    """Privileged helper executables matching the vendor prefix or name."""
+    d = _helper_dir()
+    if not os.path.isdir(d):
+        return []
+    prefix = _vendor_prefix(bundle_id)
+    lowered_name = name.lower()
+    found: list[str] = []
+    for entry in os.scandir(d):
+        if not entry.is_file():
+            continue
+        e = entry.name.lower()
+        if prefix and e.startswith(prefix):
+            found.append(entry.path)
+        elif lowered_name and lowered_name in e:
+            found.append(entry.path)
+    return sorted(set(found))
+
+
+def _build_fingerprint(app: AppInfo, home: Path | None = None) -> dict:
+    """Find every launch plist + leftover owned by ``app``.
+
+    Mechanical ownership: a launch item belongs to the app if its label equals
+    the app's bundle id, or its executable lives inside the app bundle. No
+    substring/brand guessing.
+    """
+    home = home or Path(os.environ.get("CLEANMAC_HOME", Path.home()))
+    bundle = app.bundle_id or ""
+    app_dir = os.path.dirname(app.path)
+
+    launch_dirs = [
+        home / "Library" / "LaunchAgents",
+        Path("/Library/LaunchAgents"),
+        Path("/Library/LaunchDaemons"),
+    ]
+    launch_labels: list[str] = []
+    launch_paths: list[str] = []
+    for d in launch_dirs:
+        if not d.is_dir():
+            continue
+        for plist in d.glob("*.plist"):
+            label = plist.stem
+            exe = None
+            try:
+                with plist.open("rb") as f:
+                    data = plistlib.load(f)
+                label = data.get("Label", label)
+                prog = data.get("Program")
+                args = data.get("ProgramArguments") or []
+                exe = str(prog or (args[0] if args else ""))
+            except (OSError, plistlib.InvalidFileException, PermissionError):
+                pass
+            owned = False
+            if bundle and label.lower() == bundle.lower():
+                owned = True
+            if exe and app_dir and exe.startswith(app_dir):
+                owned = True
+            prefix = _vendor_prefix(bundle)
+            if prefix and label.lower().startswith(prefix):
+                owned = True
+            if owned:
+                launch_labels.append(label)
+                launch_paths.append(str(plist))
+
+    # User leftovers (Application Support, Caches, Containers, Preferences...)
+    leftovers = _user_paths(app) if home else []
+
+    return {
+        "launch_labels": launch_labels,
+        "launch_paths": launch_paths,
+        "leftovers": leftovers,
+    }
+
+
+def _build_fingerprint_for_target(target) -> dict:
+    """Fingerprint from an ``UninstallTarget`` (live app or leftover-only).
+
+    For a leftover-only target the bundle path is empty, so launch
+    ownership is matched on bundle id alone; leftovers come from both the
+    display name and bundle id. Includes BAA items whose associated
+    bundle id matches the target.
+    """
+    app = AppInfo(
+        name=target.name,
+        bundle_id=target.bundle_id,
+        path=target.path,
+        version=None,
+        size_kb=0,
+    )
+    fp = _build_fingerprint(app)
+    fp["system_paths"] = _system_paths(app)
+    fp["brew"] = brew_paths(target.bundle_id or "", target.name)
+    fp["helpers"] = helper_paths(target.bundle_id or "", target.name)
+    # Do not call sfltool dumpbtm here. That tool shows a macOS
+    # authorization popup we cannot grant or dismiss from the CLI.
+    fp["bba"] = []
+    return fp
+
+
+def _is_system_launch(path: str) -> bool:
+    return "LaunchDaemons" in path or path.startswith("/Library/LaunchAgents")
+
+
+def _classify_store(path: str) -> str:
+    """Map a leftover path to a matrix column (support/cache/prefs/...)."""
+    p = path.lower()
+    if "application support" in p:
+        return "support"
+    if "/caches/" in p or "caches" in p:
+        return "cache"
+    if "preferences" in p:
+        return "prefs"
+    if "containers" in p:
+        return "container"
+    if "saved application state" in p:
+        return "saved"
+    if "launchagents" in p:
+        return "agents"
+    if "launchdaemons" in p:
+        return "daemons"
+    if "privilegedhelper" in p:
+        return "helpers"
+    if "receipts" in p or "pkgutil" in p:
+        return "pkg"
+    if "brew" in p or "caskroom" in p or "cellar" in p:
+        return "brew"
+    return "other"
+
+
+def _build_matrix(target, fp: dict) -> dict[str, str]:
+    """Classify every leftover/launch/brew/helper path into a store flag.
+
+    Returns {column: "Y"|"N"|"—"}. Columns with no delete action (kext,
+    btm) are always "—".
+    """
+    matrix: dict[str, str] = {
+        "app": "Y" if target.app_installed else "N",
+        "mas": "Y" if target.app_installed else "—",
+        "pkg": "N",
+        "brew": "N",
+        "support": "N",
+        "cache": "N",
+        "prefs": "N",
+        "container": "N",
+        "saved": "N",
+        "agents": "N",
+        "daemons": "N",
+        "helpers": "N",
+        "kext": "—",
+        "btm": "—",
+    }
+
+    def mark(column: str, paths) -> None:
+        if paths and matrix.get(column) != "Y":
+            matrix[column] = "Y"
+
+    # launch items already carry system vs user scope via path.
+    for label, path in zip(fp.get("launch_labels", []), fp.get("launch_paths", [])):
+        if path:
+            mark("daemons" if "LaunchDaemons" in path else "agents", [path])
+    for p in fp.get("leftovers", []):
+        mark(_classify_store(p), [p])
+    for p in fp.get("system_paths", []):
+        mark(_classify_store(p), [p])
+    mark("brew", fp.get("brew", []))
+    mark("helpers", fp.get("helpers", []))
+    mark("pkg", fp.get("pkg", []))
+    return matrix
+
+
+def _quarantine_launch(label, path, deleter, sudo, reporter) -> None:
+    """Bootout + move a launch plist to quarantine (never hard-delete).
+
+    System-scope plists are moved with sudo. Failures are reported, not raised.
+    """
+    import shutil
+
+    home = Path(os.environ.get("CLEANMAC_HOME", Path.home()))
+    quarantine = home / "Library" / "LaunchAgents-disabled"
+    quarantine.mkdir(parents=True, exist_ok=True)
+    dest = quarantine / os.path.basename(path)
+    system = _is_system_launch(path)
+    if not deleter.commit:
+        reporter.info("launch_would_quarantine", label=label, to=str(dest))
+        return
+    try:
+        if system:
+            if sudo is None:
+                reporter.warn(
+                    "launch_quarantine_failed",
+                    label=label,
+                    path=path,
+                    err="needs sudo",
+                )
+                return
+            sudo.run(["launchctl", "bootout", f"system/{label}"])
+            r = sudo.run(["mv", path, str(dest)])
+            if r.returncode != 0:
+                reporter.warn(
+                    "launch_quarantine_failed",
+                    label=label,
+                    path=path,
+                    err=getattr(r, "stderr", "") or "mv failed",
+                )
+                return
+        else:
+            import subprocess
+
+            subprocess.run(
+                ["launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
+                capture_output=True,
+                check=False,
+            )
+            shutil.move(path, str(dest))
+        reporter.info("launch_quarantined", label=label, to=str(dest))
+    except OSError as exc:
+        reporter.warn(
+            "launch_quarantine_failed",
+            label=label,
+            path=path,
+            err=str(exc),
+        )
+
+
+def _run_remove(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
     app = _find_app(args.app, force=args.force)
-    print(f"App: {app.name} ({app.bundle_id}) — {dir_size_kb(app.path)}K")
-    print("Leftovers (user):")
+    reporter.info(
+        "app_found",
+        name=app.name,
+        bundle_id=app.bundle_id,
+        path=app.path,
+        size_kb=dir_size_kb(app.path),
+    )
     user = _user_paths(app)
-    for p in user:
-        print(f"  · {p}")
-    print("Leftovers (system, sudo):")
+    reporter.info("user_leftovers", count=len(user), paths=user)
     sys_paths = _system_paths(app)
-    for p in sys_paths:
-        print(f"  · {p}")
+    reporter.info("system_leftovers", count=len(sys_paths), paths=sys_paths)
 
     if not user and not sys_paths:
-        print("No leftovers found.")
+        reporter.info("no_leftovers_found")
         return 0
 
-    print("\nDeleting app bundle + leftovers:")
+    reporter.info("app_remove_started", bundle=app.path)
     deleter.delete("app_remove", [app.path])
     deleter.delete("app_remove", user)
     deleter.delete("app_remove", sys_paths, sudo=sudo)
+    return 0
+
+
+def spotlight_orphan_paths(bundle_id: str) -> list[str]:
+    """Live (pre-delete) Spotlight hits for ``bundle_id``.
+
+    Captures every path Apple has indexed against this bundle, used to
+    print a precise list before the ``.app`` is removed. After deletion,
+    Spotlight loses the metadata — this is intentional.
+    """
+    from maccleaner import spotlight as sp
+
+    raw = sp.find_bundle_paths(bundle_id)
+    return [p for p in raw if is_safe_path(p)]
+
+
+def _leftover_paths_for_bundle(bundle_id: str) -> list[str]:
+    """Leftover paths an already-uninstalled app leaves behind.
+
+    Combines the existing pattern-based scanner with a heuristic sweep
+    of the most likely sibling dirs in ``~/Library`` (Application
+    Support, Caches, Containers, HTTPStorages, Preferences, Saved
+    Application State). Apple's Launch Services retains the bundle id
+    after the ``.app`` is gone, but Spotlight's bundle-id index does
+    not — so we cannot rely on ``mdfind`` here.
+    """
+    if not bundle_id:
+        return []
+    parts = bundle_id.split(".")
+    candidates: set[str] = {
+        parts[-1],                       # VSCode
+        ".".join(parts[-2:]),            # microsoft.VSCode
+        parts[-2] if len(parts) >= 2 else "",  # microsoft
+    }
+    home = Path(os.environ.get("CLEANMAC_HOME", Path.home()))
+    likely_roots = (
+        "Application Support",
+        "Caches",
+        "Containers",
+        "HTTPStorages",
+        "Preferences",
+        "Saved Application State",
+        "Logs",
+        "Group Containers",
+    )
+    found: list[str] = []
+    seen_paths: set[str] = set()
+    # 1) Run the pattern scanner against each candidate name.
+    seen_names: set[str] = set()
+    for name in candidates:
+        if not name or name in seen_names:
+            continue
+        seen_names.add(name)
+        app = AppInfo(name=name, bundle_id=bundle_id, path="", version=None, size_kb=0)
+        for p in _user_paths(app):
+            if p not in seen_paths:
+                seen_paths.add(p)
+                found.append(p)
+    # 2) Heuristic sweep: exact bundle id and lowercase prefix under likely
+    # Library roots (Apple apps store under both names depending on build).
+    for root in likely_roots:
+        base = home / "Library" / root
+        if not base.is_dir():
+            continue
+        for probe in (bundle_id, bundle_id.lower(), parts[-1], parts[-1].lower()):
+            if not probe:
+                continue
+            cand = base / probe
+            if cand.exists() and str(cand) not in seen_paths:
+                seen_paths.add(str(cand))
+                found.append(str(cand))
+    return found
+
+
+def _run_uninstall(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
+    """Deep uninstall: app bundle + leftovers + owned launch plists.
+
+    Dry-run by default. On --commit it deletes the bundle and leftovers via
+    the Deleter, then bootout + quarantines any launch plist owned by the app.
+    """
+    app = _find_app(args.name, force=args.force if hasattr(args, "force") else False)
+    reporter.info(
+        "uninstall_app",
+        name=app.name,
+        bundle_id=app.bundle_id,
+        path=app.path,
+    )
+    # Capture Spotlight hits BEFORE deletion (Spotlight loses the index
+    # entry once the .app is gone). This is the authoritative leftover
+    # list; pattern scanning is the fallback.
+    if app.bundle_id:
+        spotlight_hits = spotlight_orphan_paths(app.bundle_id)
+        reporter.info("uninstall_spotlight", count=len(spotlight_hits))
+    else:
+        spotlight_hits = []
+    fp = _build_fingerprint(app)
+    user = list(dict.fromkeys(spotlight_hits + fp["leftovers"]))
+    sys_paths = _system_paths(app)
+    reporter.info(
+        "uninstall_fingerprint",
+        launch_labels=fp["launch_labels"],
+        launch_paths=fp["launch_paths"],
+        user_count=len(user),
+        system_count=len(sys_paths),
+    )
+
+    if not deleter.commit:
+        reporter.info("uninstall_dryrun", app=app.name, count=len(fp["launch_labels"]))
+        reporter.dryrun()
+        return 0
+
+    # 1. Remove app bundle + user/system leftovers
+    if getattr(args, "yes", False):
+        deleter.confirm_fn = lambda _p: True
+    deleter.delete("app_uninstall", [app.path])
+    deleter.delete("app_uninstall", user)
+    deleter.delete("app_uninstall", sys_paths, sudo=sudo)
+
+    # 2. Bootout + quarantine owned launch plists
+    orphans = [
+        Orphan(
+            label=label,
+            path=path,
+            exe=None,
+            scope="system" if "LaunchDaemons" in path or "/Library/LaunchAgents" in path else "user",
+        )
+        for label, path in zip(fp["launch_labels"], fp["launch_paths"])
+    ]
+    return _orphans_purge(orphans, deleter, sudo, reporter, yes=getattr(args, "yes", False))
+
+
+def _run_purge_by_id(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
+    """Wipe leftovers of an already-uninstalled app by bundle id.
+
+    Uses the existing pattern scanner (Application Support, Caches, etc.)
+    and the in-process Spotlight cache; both ignore the missing ``.app``
+    bundle. Dry-run by default.
+    """
+    bundle = args.bundle
+    reporter.info("purge_by_id", bundle=bundle)
+    leftovers = _leftover_paths_for_bundle(bundle)
+    if not deleter.commit:
+        for path in leftovers:
+            reporter.info("purge_by_id_target", path=path)
+        reporter.info(
+            "purge_by_id_dryrun",
+            bundle=bundle,
+            count=len(leftovers),
+        )
+        return 0
+    if getattr(args, "yes", False):
+        deleter.confirm_fn = lambda _p: True
+    deleter.delete("app_uninstall", leftovers)
+    reporter.info("purge_by_id_complete", bundle=bundle, count=len(leftovers))
     return 0
 
 
@@ -188,52 +752,105 @@ def _scope_for_path(path: str) -> str:
         return "system"
     return "user"
 
+@dataclass
+class Orphan:
+    """One launch item that appears to belong to an uninstalled app."""
+    label: str
+    path: str
+    exe: str | None
+    scope: str  # "user" or "system"
 
-def _run_startup(args, sudo: Sudo) -> int:
+
+
+def _run_startup(args, sudo: Sudo, reporter: Reporter) -> int:
     if args.action == "list":
-        return _startup_list()
+        return _startup_list(reporter, orphans_only=getattr(args, "orphans_only", False))
     if args.action == "disable":
-        return _startup_disable(args.label, sudo)
+        return _startup_disable(args.label, sudo, reporter)
     return 2
 
 
-def _startup_list() -> int:
+def _startup_list(reporter: Reporter, orphans_only: bool = False) -> int:
+    """List every launch item, with a per-item orphan flag (or filter to orphans).
+
+    Default list skips system_profiler and per-plist launchctl (those are
+    the slow path). Orphan detection still uses inventory when requested.
+    """
     dirs = [
         Path.home() / "Library/LaunchAgents",
         Path("/Library/LaunchAgents"),
         Path("/Library/LaunchDaemons"),
     ]
-    print(f"{'Label':<48} {'Scope':<8} {'State':<8} Path")
+    installed_apps: set[str] = set()
+    if orphans_only:
+        from maccleaner import inventory
+
+        installed_apps = inventory.installed_app_names()
+    rows: list[list[str]] = []
+
+    shown = 0
     for d in dirs:
         if not d.is_dir():
             continue
         for plist in sorted(d.glob("*.plist")):
             label = plist.stem
+            data = {}
+            exe = None
             try:
                 with plist.open("rb") as f:
                     data = plistlib.load(f)
                 label = data.get("Label", label)
-            except (OSError, plistlib.InvalidFileException):
+                prog = data.get("Program")
+                args = data.get("ProgramArguments") or []
+                exe = str(prog or (args[0] if args else "")).strip() or None
+            except (OSError, plistlib.InvalidFileException, PermissionError):
                 pass
+
             scope = _scope_for_path(str(d))
             state = "?"
-            if scope == "user":
-                r = subprocess.run(
-                    ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                state = "running" if r.returncode == 0 else "stopped"
-            print(f"{label:<48} {scope:<8} {state:<8} {plist}")
+            orphaned = _is_item_orphan(label, exe, installed_apps) if orphans_only else False
+
+            if orphans_only and not orphaned:
+                continue
+
+            rows.append([label, scope, state, "yes" if orphaned else "no", str(plist)])
+            shown += 1
+
+    event = "startup_orphans_list" if orphans_only else "startup_list"
+    reporter.table(
+        event,
+        ["Label", "Scope", "State", "Orphaned", "Path"],
+        rows,
+    )
+    if orphans_only:
+        reporter.info("startup_orphans_complete", count=shown)
     return 0
 
 
-def _startup_disable(label: str, sudo: Sudo) -> int:
+def _is_item_orphan(label: str, exe: str | None, installed_apps: set[str]) -> bool:
+    """Mechanical orphan check for a launch item.
+
+    An item is orphan iff its executable is missing AND no installed app
+    name matches the launch label. No brand dictionary.
+    """
+    # Label matches an installed app -> live.
+    label_l = label.lower()
+    for app in installed_apps:
+        stem = app[:-4] if app.endswith(".app") else app
+        stem = stem.lower()
+        if stem and (label_l == stem or label_l in stem or stem in label_l):
+            return False
+    # Executable still present -> live.
+    if exe and os.path.exists(exe):
+        return False
+    return True
+
+
+
+def _startup_disable(label: str, sudo: Sudo, reporter: Reporter) -> int:
     if not label:
-        print("Usage: cleanmac app startup disable <label>")
+        reporter.error("usage", msg="cleanmac app startup disable <label>")
         return 2
-    # find the plist
     candidates = [
         Path.home() / "Library/LaunchAgents" / f"{label}.plist",
         Path("/Library/LaunchAgents") / f"{label}.plist",
@@ -241,16 +858,19 @@ def _startup_disable(label: str, sudo: Sudo) -> int:
     ]
     plist_path = next((p for p in candidates if p.exists()), None)
     if not plist_path:
-        print(f"LaunchAgent not found: {label}")
+        reporter.error("launchagent_not_found", label=label)
         return 1
 
     target = Path.home() / "Library/LaunchAgents-disabled"
     target.mkdir(parents=True, exist_ok=True)
 
-    # 1. stop now (modern launchctl API — audit MAJOR-3)
     if "LaunchDaemons" in str(plist_path):
         r = sudo.run(["launchctl", "bootout", f"system/{label}"])
-        print("  bootout system:", "ok" if r.returncode == 0 else r.stderr.strip())
+        reporter.info(
+            "bootout_system",
+            ok=r.returncode == 0,
+            stderr=r.stderr.strip() if r.returncode != 0 else None,
+        )
     else:
         r = subprocess.run(
             ["launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
@@ -258,66 +878,414 @@ def _startup_disable(label: str, sudo: Sudo) -> int:
             text=True,
             check=False,
         )
-        print("  bootout gui:", "ok" if r.returncode == 0 else r.stderr.strip())
+        reporter.info(
+            "bootout_gui",
+            ok=r.returncode == 0,
+            stderr=r.stderr.strip() if r.returncode != 0 else None,
+        )
 
-    # 2. move to disabled dir to prevent next login
     dest = target / plist_path.name
     plist_path.rename(dest)
-    print(f"  ✓ moved to {dest}")
+    reporter.info("moved_to_disabled", dest=str(dest))
     return 0
 
 
-def _run_extensions() -> int:
+def _orphans_purge(
+    orphans: list[Orphan],
+    deleter: Deleter,
+    sudo: Sudo,
+    reporter: Reporter,
+    yes: bool = False,
+) -> int:
+    """Disable (bootout) + remove orphaned launch items.
+
+    Each plist is moved into ~/Library/LaunchAgents-disabled/ so the action
+    is reversible. System-scope plists use sudo. Every action is audited.
+    """
+    if not orphans:
+        reporter.info("orphans_purge_empty")
+        return 0
+
+    # Honor CLEANMAC_HOME so tests can sandbox the quarantine dir.
+    target_root = Path(os.environ.get("CLEANMAC_HOME", Path.home()))
+    target = target_root / "Library/LaunchAgents-disabled"
+
+    if not deleter.commit:
+        # Dry-run: enumerate only. No bootout, no move.
+        reporter.info(
+            "orphans_purge_dryrun",
+            count=len(orphans),
+            items=[o.__dict__ for o in orphans],
+            target=str(target),
+        )
+        return 0
+
+    target.mkdir(parents=True, exist_ok=True)
+    reporter.info("orphans_purge_started", count=len(orphans), target=str(target))
+    purged = 0
+    for o in orphans:
+        plist = Path(o.path)
+        if not plist.exists():
+            reporter.warn("orphan_missing", label=o.label, path=o.path)
+            continue
+
+        # 1. Bootout first (idempotent — ok if not loaded)
+        if o.scope == "system":
+            r = sudo.run(["launchctl", "bootout", f"system/{o.label}"])
+            reporter.info(
+                "orphan_bootout_system",
+                label=o.label,
+                ok=r.returncode == 0,
+                stderr=r.stderr.strip() if r.returncode != 0 else None,
+            )
+        else:
+            r = subprocess.run(
+                ["launchctl", "bootout", f"gui/{os.getuid()}/{o.label}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            reporter.info(
+                "orphan_bootout_gui",
+                label=o.label,
+                ok=r.returncode == 0,
+                stderr=r.stderr.strip() if r.returncode != 0 else None,
+            )
+
+        # 2. Move plist to quarantine (reversible)
+        dest = target / plist.name
+        if dest.exists():
+            stem = dest.stem
+            i = 1
+            while dest.exists():
+                dest = target / f"{stem}-{i}.plist"
+                i += 1
+        try:
+            if o.scope == "system":
+                # root-owned plist — need sudo mv
+                r = sudo.run(["mv", str(plist), str(dest)])
+                if r.returncode != 0:
+                    reporter.error(
+                        "orphan_move_failed",
+                        label=o.label,
+                        stderr=r.stderr.strip(),
+                    )
+                    deleter.auditor.write(
+                        "orphan_purge", "failed", str(plist)
+                    )
+                    continue
+            else:
+                plist.rename(dest)
+            reporter.info("orphan_moved", label=o.label, dest=str(dest))
+            deleter.auditor.write(
+                "orphan_purge", "deleted", str(plist), 0
+            )
+            purged += 1
+        except OSError as e:
+            reporter.error("orphan_move_failed", label=o.label, error=str(e))
+            deleter.auditor.write("orphan_purge", "failed", str(plist))
+
+    reporter.info("orphans_purge_complete", purged=purged, total=len(orphans))
+    # Return 0 unless something failed — missing plists are not failures.
+    return 0
+
+
+def _run_orphans(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
+    """Dispatch for `app orphans`. Aliases the single BBA/sfltool engine."""
+    # Map orphans_action -> bba_action (same verbs).
+    bba_args = type("B", (), {"bba_action": args.orphans_action,
+                              "commit": getattr(args, "commit", False),
+                              "yes": getattr(args, "yes", False)})()
+    return _run_bba(bba_args, deleter, sudo, reporter)
+
+
+def _run_bba(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
+    """Dispatch for the `app bba` subcommand (Background App Activity)."""
+    from maccleaner import bba as bba_mod
+
+    if args.bba_action == "list":
+        items = bba_mod.find_bba_orphans(include_state=True)
+        rows = [
+            [
+                it.label,
+                it.scope,
+                it.state or "?",
+                it.name,
+                it.developer,
+                ",".join(it.associated_bundle_ids),
+                it.plist_url or "",
+            ]
+            for it in items
+        ]
+        reporter.table(
+            "bba_orphans_list",
+            ["Label", "Scope", "State", "Name", "Developer", "BundleIds", "Plist"],
+            rows,
+        )
+        reporter.info("bba_orphans_complete", count=len(items))
+        return 0
+
+    if args.bba_action == "purge":
+        items = bba_mod.find_bba_orphans(include_state=False)
+        if not items:
+            reporter.info("bba_orphans_none")
+            return 0
+
+        reporter.info(
+            "bba_orphans_found",
+            count=len(items),
+            items=[
+                {
+                    "label": it.label,
+                    "scope": it.scope,
+                    "plist": it.plist_url,
+                    "exe": it.executable_path,
+                    "developer": it.developer,
+                }
+                for it in items
+            ],
+        )
+        if not deleter.commit:
+            reporter.info("bba_purge_dryrun", count=len(items))
+            return 0
+
+        if args.yes:
+            deleter.confirm_fn = lambda _p: True
+
+        # Convert BbaItem -> Orphan so we reuse _orphans_purge
+        orphans = [
+            Orphan(
+                label=it.label,
+                path=it.plist_url,
+                exe=it.executable_path or None,
+                scope=it.scope if it.scope in ("system", "user") else "user",
+            )
+            for it in items
+            if it.plist_url
+        ]
+        return _orphans_purge(orphans, deleter, sudo, reporter, yes=args.yes)
+    return 2
+
+
+def _run_extensions(reporter: Reporter) -> int:
     chrome = (
         Path.home() / "Library/Application Support/Google/Chrome/Default/Extensions"
     )
     safari = Path.home() / "Library/Containers/com.apple.Safari"
     ff = Path.home() / "Library/Application Support/Firefox/Profiles"
-    print("Chrome extensions:")
-    if chrome.is_dir():
-        for e in sorted(chrome.iterdir()):
-            print(f"  · {e.name}")
-    else:
-        print("  (none)")
-    print("Safari app extensions:")
-    if safari.is_dir():
-        for e in sorted(safari.glob("Extensions/*")):
-            print(f"  · {e.name}")
-    else:
-        print("  (none)")
-    print("Firefox profiles:")
-    if ff.is_dir():
-        for prof in sorted(ff.iterdir()):
-            print(f"  · {prof.name}")
-    else:
-        print("  (none)")
+    chrome_exts = sorted([e.name for e in chrome.iterdir()]) if chrome.is_dir() else []
+    safari_exts = (
+        sorted([e.name for e in safari.glob("Extensions/*")]) if safari.is_dir() else []
+    )
+    ff_profiles = sorted([prof.name for prof in ff.iterdir()]) if ff.is_dir() else []
+    reporter.info(
+        "extensions_list",
+        chrome=chrome_exts,
+        safari=safari_exts,
+        firefox=ff_profiles,
+    )
     return 0
 
 
-def _run_update() -> int:
-    print("Outdated App Store apps (mas):")
-    r = subprocess.run(["mas", "outdated"], capture_output=True, text=True, check=False)
-    print(r.stdout.strip() or "  (mas not installed or up to date)")
-    print("Outdated Homebrew casks:")
-    r = subprocess.run(
+def _run_update(reporter: Reporter) -> int:
+    mas = subprocess.run(
+        ["mas", "outdated"], capture_output=True, text=True, check=False
+    )
+    brew = subprocess.run(
         ["brew", "outdated", "--cask"], capture_output=True, text=True, check=False
     )
-    print(r.stdout.strip() or "  (brew not installed or up to date)")
+    reporter.info(
+        "outdated_apps",
+        mas=mas.stdout.strip(),
+        brew=brew.stdout.strip(),
+    )
     return 0
 
 
-def run(args, deleter: Deleter, sudo: Sudo) -> int:
-    if args.app_cmd == "list":
-        apps = list_apps()
-        print(f"{'Name':<32} {'Bundle ID':<42} {'Size':>10}")
-        for a in apps:
-            print(
-                f"{a.name[:30]:<32} {(a.bundle_id or '')[:40]:<42} {dir_size_kb(a.path):>9}K"
+def _parse_key(data: bytes) -> str:
+    """Map a raw terminal byte sequence to a semantic key.
+
+    Supports arrow keys (ESC [ A/B/C/D), Enter (\r or \n), and cancel
+    (q, ESC, Ctrl-C). Plain printable bytes map to themselves.
+    """
+    if data in (b"\x1b[A", b"\x1bOA"):
+        return "up"
+    if data in (b"\x1b[B", b"\x1bOB"):
+        return "down"
+    if data in (b"\x1b[C", b"\x1bOC"):
+        return "right"
+    if data in (b"\x1b[D", b"\x1bOD"):
+        return "left"
+    if data in (b"\r", b"\n"):
+        return "enter"
+    if data in (b"\x1b", b"q", b"Q", b"\x03"):
+        return "cancel"
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+
+
+def _move_cursor(idx: int, key: str, total: int) -> int:
+    """Move the selection index up/down, clamped to [0, total)."""
+    if key == "down":
+        return min(idx + 1, total - 1)
+    if key == "up":
+        return max(idx - 1, 0)
+    return idx
+
+
+def _visible_window(idx: int, total: int, height: int = 15) -> tuple[int, int]:
+    """Return a (start, end) slice of ``total`` rows centered on ``idx``.
+
+    Never clears the screen; the caller redraws only this window.
+    """
+    if total <= height:
+        return (0, total)
+    half = height // 2
+    start = max(0, min(idx - half, total - height))
+    return (start, start + height)
+
+
+def _render_rows(
+    apps: list[str], idx: int, start: int, end: int
+) -> str:
+    """Build a raw-mode-safe block of rows for indices [start, end).
+
+    Joins with CR+LF: in tty.setraw(), a bare LF only moves down and
+    leaves the column, which stairs the list.
+    """
+    lines: list[str] = []
+    for i in range(start, end):
+        marker = "▸" if i == idx else " "
+        lines.append(f" {marker} {apps[i]}")
+    return "\r\n".join(lines)
+
+
+def _picker_paint(
+    apps: list[str],
+    idx: int,
+    start: int,
+    end: int,
+    prev_lines: int = 0,
+    filter_text: str = "",
+) -> tuple[str, int]:
+    """Paint one picker frame. Rewind ``prev_lines`` instead of appending.
+
+    Returns (bytes_to_write, line_count_of_this_frame).
+    """
+    body = _render_rows(apps, idx, start, end)
+    hint = f"  filter: {filter_text or '(type to filter)'}"
+    frame_lines = (body.split("\r\n") if body else []) + [hint]
+    n = len(frame_lines)
+    parts: list[str] = []
+    if prev_lines > 0:
+        parts.append(f"\r\x1b[{prev_lines}A")
+    for line in frame_lines:
+        parts.append(f"\r\x1b[2K{line}\r\n")
+    return ("".join(parts), n)
+
+
+def _pick_app_interactive(reporter: Reporter) -> str | None:
+    """Show an arrow-key navigable list of apps; return the chosen name.
+
+    Up/Down to move, Enter to select, type to filter, q / Esc / Ctrl-C to
+    cancel. Redraws only a small window of rows — never clears the whole
+    screen. stdlib termios/tty only.
+    """
+    apps = list_apps()
+    if not apps:
+        reporter.warn("no_apps_installed")
+        return None
+
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    query = ""
+    prev_lines = 0
+    try:
+        tty.setraw(fd)
+        sys.stdout.write("\x1b[?25l")
+        sys.stdout.flush()
+        idx = 0
+        while True:
+            shown = apps
+            if query:
+                q = query.lower()
+                shown = [
+                    a
+                    for a in apps
+                    if q in a.name.lower() or (a.bundle_id and q in a.bundle_id.lower())
+                ]
+            if idx >= len(shown):
+                idx = max(0, len(shown) - 1)
+            start, end = _visible_window(idx, len(shown))
+            rows = [a.name for a in shown]
+            frame, prev_lines = _picker_paint(
+                rows, idx, start, end, prev_lines=prev_lines, filter_text=query
             )
-        print(f"\n{len(apps)} apps")
+            sys.stdout.write(frame)
+            sys.stdout.flush()
+
+            chunk = os.read(fd, 1)
+            if chunk == b"\x1b":
+                more = os.read(fd, 2)
+                key = _parse_key(chunk + more)
+            else:
+                key = _parse_key(chunk)
+
+            if key == "down":
+                idx = _move_cursor(idx, "down", len(shown))
+            elif key == "up":
+                idx = _move_cursor(idx, "up", len(shown))
+            elif key == "enter":
+                if shown:
+                    chosen = shown[idx].name
+                    sys.stdout.write(f"\x1b[0m\x1b[?25h\r\nSelected: {chosen}\r\n")
+                    sys.stdout.flush()
+                    return chosen
+            elif key == "cancel":
+                sys.stdout.write("\x1b[0m\x1b[?25h\r\n")
+                sys.stdout.flush()
+                return None
+            elif key in ("\x7f", "\x08", "backspace"):
+                query = query[:-1]
+            elif len(key) == 1 and key.isprintable():
+                query += key
+    finally:
+        sys.stdout.write("\x1b[0m\x1b[?25h")
+        sys.stdout.flush()
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def run(args, deleter: Deleter, sudo: Sudo, reporter: Reporter) -> int:
+    if args.app_cmd == "list":
+        apps = list_apps(include_size=True)
+        rows = [
+            [a.name, a.bundle_id or "", view.human_size(a.size_kb * 1024)]
+            for a in apps
+        ]
+        reporter.table("apps_list", ["Name", "Bundle ID", "Size"], rows)
         return 0
     if args.app_cmd == "remove":
-        return _run_remove(args, deleter, sudo)
+        return _run_remove(args, deleter, sudo, reporter)
+    if args.app_cmd == "uninstall":
+        # Interactive picker when no --name given and stdin is a TTY.
+        if not getattr(args, "name", None):
+            if sys.stdin.isatty():
+                picked = _pick_app_interactive(reporter)
+                if not picked:
+                    reporter.warn("uninstall_cancelled")
+                    return 0
+                args = type("B", (), {**vars(args), "name": picked})()
+            else:
+                reporter.error("usage", msg="use --name <app> when not interactive")
+                return 2
+        return _run_uninstall(args, deleter, sudo, reporter)
+    if args.app_cmd == "purge-by-id":
+        return _run_purge_by_id(args, deleter, sudo, reporter)
     if args.app_cmd == "reset":
         app = _find_app(args.app)
         home = Path(os.environ.get("CLEANMAC_HOME", Path.home()))
@@ -327,9 +1295,13 @@ def run(args, deleter: Deleter, sudo: Sudo) -> int:
         deleter.delete("app_reset", paths)
         return 0
     if args.app_cmd == "startup":
-        return _run_startup(args, sudo)
+        return _run_startup(args, sudo, reporter)
+    if args.app_cmd == "orphans":
+        return _run_orphans(args, deleter, sudo, reporter)
+    if args.app_cmd == "bba":
+        return _run_bba(args, deleter, sudo, reporter)
     if args.app_cmd == "extensions":
-        return _run_extensions()
+        return _run_extensions(reporter)
     if args.app_cmd == "update":
-        return _run_update()
+        return _run_update(reporter)
     return 2

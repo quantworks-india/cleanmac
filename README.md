@@ -72,6 +72,40 @@ cleanmac hidden show        # show hidden files
 | `cleanmac mem heavy` | List top CPU/RAM consumers |
 | `cleanmac hidden show` | Show hidden files in Finder |
 | `cleanmac hidden hide` | Hide hidden files in Finder |
+| `cleanmac uninstall` | **Remove an app + every leftover** (interactive picker) |
+| `cleanmac uninstall <name-or-bundle>` | Remove a specific app / leftover-only cleanup (single y/N confirm) |
+| `cleanmac app startup list` | List all LaunchAgents/LaunchDaemons with state |
+| `cleanmac app startup list --orphans-only` | **List only orphaned agents from apps you no longer have installed** |
+| `cleanmac app orphans` | Shortcut for the above |
+| `cleanmac app orphans list` | Same as `cleanmac app orphans` |
+| `cleanmac app orphans purge` | Bootout + move orphaned plists to `~/Library/LaunchAgents-disabled` (dry-run; use `--commit` to act) |
+| `cleanmac app bba list` | **Alias** of `cleanmac app orphans list` — Background App Activity (Apple `sfltool dumpbtm`) |
+| `cleanmac app bba purge` | **Alias** of `cleanmac app orphans purge` |
+| `cleanmac app startup disable <label>` | Safely disable one (moves plist + launchctl bootout) |
+
+
+### Uninstall matrix
+
+`cleanmac uninstall` prints a one-row boolean matrix showing where the app
+left state. `Y` = present (will be removed), `N` = absent, `—` = not
+addressable by cleanmac (never deleted):
+
+```
+         app         mas         pkg        brew     support       cache       prefs   container       saved      agents     daemons     helpers        kext         btm
+           N           —           N           N           N           N           N           N           N           N           N           Y           —           —
+```
+
+| Column | Store | Cleared? |
+|---|---|---|
+| `app` | `.app` bundle | yes |
+| `mas` | App Store receipt (inside bundle) | only while bundle lives |
+| `pkg` | `/private/var/db/receipts` | yes |
+| `brew` | Homebrew Caskroom / Cellar | yes |
+| `support` / `cache` / `prefs` / `container` / `saved` | `~/Library` stores | yes |
+| `agents` / `daemons` | LaunchAgents / LaunchDaemons (quarantined, not deleted) | yes |
+| `helpers` | `/Library/PrivilegedHelperTools` (sudo) | yes |
+| `kext` / `btm` | kernel extensions / login items | never (`—`) |
+
 
 Global flags (must appear before subcommand):
 
@@ -79,6 +113,70 @@ Global flags (must appear before subcommand):
 |---|---|---|
 | `--dry-run` | **on** | Preview only, delete nothing |
 | `--commit` | off | Actually delete. Without this, nothing is removed |
+| `--json` | off | Emit one structured JSON event per line on stdout (pipe to `jq`) |
+| `--verbose` | off | Print debug-level progress (file-by-file, scan counters) |
+
+### Data sources
+
+`cleanmac` prefers Apple's native, structured tooling over ad-hoc text parsing:
+
+| Capability | Source |
+|---|---|
+| Installed apps | `system_profiler SPApplicationsDataType -json` (cached per process) |
+| Background App Activity / orphans | `sfltool dumpbtm` + `launchctl print` |
+| Helper → parent app attribution | Apple's `attributions.plist` (via `plistlib`) |
+| Memory free bytes | `sysctl -n hw.pagesize` / `vm.page_free_count` / `vm.page_speculative_count` |
+| Network mount points | `getmntinfo(2)` via stdlib `ctypes` |
+| Launch plists / Info.plist | `plistlib` |
+| Finder hidden files | `defaults` + `killall Finder` |
+
+No regex on `backgrounditems.btm` or `mount(8)` text; no hand-rolled vendor
+"orphan brand" lists. Orphan detection is mechanical: an item is orphaned iff
+no installed app name/attribution matches **and** both its executable and plist
+are missing from disk.
+
+### Human output
+
+Default (human) mode renders aligned tables and readable status lines instead
+of debug dumps:
+
+```bash
+cleanmac disk summary
+# Size       Path
+# ---------  ----------------------------
+# 269.5 GB   Library
+# 120.0 GB   .colima
+# 5.9 GB     Pictures
+```
+
+Color is applied only when stdout is a terminal; set `NO_COLOR=1` to disable.
+
+### JSON output
+
+`--json` rewrites stdout as newline-delimited JSON events:
+
+```bash
+cleanmac --json hidden show | jq .
+# {"level": "info", "event": "hidden_files_toggled", "state": "shown"}
+```
+
+Use it from scripts:
+
+```bash
+duplicates=$(cleanmac --json dup scan ~/Downloads | jq -c 'select(.event=="dup_scan_complete") | .reclaimable_bytes')
+```
+
+The existing JSONL audit log in `~/.local/state/cleanmac/audit/` is unchanged — `--json` only affects stdout.
+
+### Verbose output
+
+`--verbose` adds debug-level events (hash progress, scan counters). Useful for long-running scans:
+
+```bash
+cleanmac --verbose dup scan ~/Downloads
+```
+
+Bash `--verbose` is forwarded to Python so a single flag enables verbose output across both engines.
 
 ---
 
@@ -101,6 +199,29 @@ Global flags (must appear before subcommand):
 ├── audit/          # JSONL audit trail (bash + Python unified)
 ├── report-<ts>.json  # bash run report
 └── dup-index.db    # Python duplicate-finder SQLite cache
+```
+
+Audit JSONL schema (one event per line):
+
+| Field | Type | Notes |
+|---|---|---|
+| `ts` | ISO 8601 UTC | Timestamp of the event |
+| `run` | string | Run ID (correlates with bash run) |
+| `mode` | `dry-run` or `live` | |
+| `step` | string | e.g. `dup_scan`, `app_remove` |
+| `action` | string | e.g. `deleted`, `would_delete`, `refused` |
+| `path` | string | Absolute path |
+| `size_bytes` | int | Size in bytes (for delete events) |
+| `duration_ms` | int | Only present when the operation recorded timing |
+
+Query the audit log with `jq`:
+
+```bash
+# all dup_scan deletions from today
+jq 'select(.step=="dup_scan" and .action=="deleted")' ~/.local/state/cleanmac/audit/*.jsonl
+
+# timing of completed scans
+jq 'select(.duration_ms) | {step, duration_ms}' ~/.local/state/cleanmac/audit/*.jsonl
 ```
 
 Environment variables: `CLEANMAC_STATE_DIR`, `CLEANMAC_HOME`, `CLEANMAC_SYS_CACHES`, `CLEANMAC_SYS_LOGS`.

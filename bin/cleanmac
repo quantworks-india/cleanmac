@@ -1,23 +1,31 @@
 #!/usr/bin/env bash
 # cleanmac — dispatcher: bash junk-cleanup OR Python subcommands.
-# Legacy:  cleanmac [--dry-run] [--verbose] [--app NAME]
-# Python:  cleanmac {app,dup,disk,mem,hidden} ...
+# Legacy:  cleanmac [--dry-run] [--verbose] [--commit] [--app NAME]
+# Python:  cleanmac [--dry-run|--commit] [--json] [--verbose] {app,dup,disk,mem,hidden} ...
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-KNOWN_SUBCOMMANDS="app dup disk mem hidden"
+KNOWN_SUBCOMMANDS="uninstall app dup disk mem hidden"
 
-# Legacy mode: no args, or first arg is NOT a known subcommand.
-#   cleanmac              → bash junk cleanup (live)
-#   cleanmac --dry-run    → bash junk cleanup dry-run
-#   cleanmac --app X      → bash leftover search
-if [[ $# -eq 0 ]] || ! [[ " $KNOWN_SUBCOMMANDS " == *" $1 "* ]]; then
+# Find the first non-flag arg to decide which engine to invoke.
+# Anything starting with '-' is a flag (skip). Stops at '--' or a positional.
+first_positional=""
+for arg in "$@"; do
+  case "$arg" in
+    --) break ;;
+    --*) continue ;;
+    -*)  continue ;;
+    *)   first_positional="$arg"; break ;;
+  esac
+done
+
+# Legacy mode: no positional arg OR first positional isn't a subcommand.
+if [[ -z "$first_positional" ]] || ! [[ " $KNOWN_SUBCOMMANDS " == *" $first_positional "* ]]; then
   exec "${HERE}/legacy_cleanmac.sh" "$@"
 fi
 
-# Python mode: first arg is a known subcommand → forward ALL args.
-# Requires python3; py dir is sibling of bin.
+# Python mode: forward ALL args.
 PY="${HERE}/../py"
 if [[ ! -d "${PY}/src/maccleaner" ]]; then
   echo "cleanmac: python package not found at ${PY}/src/maccleaner" >&2

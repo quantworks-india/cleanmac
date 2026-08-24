@@ -7,6 +7,7 @@ Generates a self-contained HTML treemap report.
 
 from __future__ import annotations
 
+import ctypes
 import html
 import json
 import os
@@ -14,29 +15,69 @@ import stat
 import subprocess
 from pathlib import Path
 
+from maccleaner import view
+from maccleaner.core import Reporter
+
 NETWORK_MOUNT_TYPES = {"nfs", "smbfs", "afpfs", "webdav", "autofs", "cifs"}
 
 
+class _Statfs(ctypes.Structure):
+    """struct statfs (macOS/BSD). We only read the string fields."""
+
+    _fields_ = [
+        ("f_bsize", ctypes.c_uint32),
+        ("f_iosize", ctypes.c_int32),
+        ("f_blocks", ctypes.c_uint64),
+        ("f_bfree", ctypes.c_uint64),
+        ("f_bavail", ctypes.c_uint64),
+        ("f_files", ctypes.c_uint64),
+        ("f_ffree", ctypes.c_uint64),
+        ("f_fsid", ctypes.c_uint64),
+        ("f_owner", ctypes.c_uint32),
+        ("f_type", ctypes.c_uint32),
+        ("f_flags", ctypes.c_uint32),
+        ("f_fssubtype", ctypes.c_uint32),
+        ("f_fstypename", ctypes.c_char * 16),
+        ("f_mntonname", ctypes.c_char * 1024),
+        ("f_mntfromname", ctypes.c_char * 1024),
+        ("f_flags_ext", ctypes.c_uint32),
+        ("f_reserved", ctypes.c_uint32 * 7),
+    ]
+
+
+def _getmntinfo_pairs() -> list[tuple[str, str]]:
+    """Return [(fstype, mountpoint), ...] via the native getmntinfo(2) call.
+
+    Uses stdlib ``ctypes`` — no ``mount(8)`` text parsing. Raises OSError if
+    the syscall fails.
+    """
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.getmntinfo.argtypes = [ctypes.POINTER(ctypes.POINTER(_Statfs)), ctypes.c_int]
+    libc.getmntinfo.restype = ctypes.c_int
+
+    buf = ctypes.POINTER(_Statfs)()
+    count = libc.getmntinfo(ctypes.byref(buf), 2)  # MNT_NOWAIT
+    if count < 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+
+    pairs: list[tuple[str, str]] = []
+    for i in range(count):
+        mnt = buf[i]
+        fs = mnt.f_fstypename.decode(errors="ignore").strip("\x00")
+        pt = mnt.f_mntonname.decode(errors="ignore").strip("\x00")
+        if fs:
+            pairs.append((fs, pt))
+    return pairs
+
+
 def _network_mount_points() -> set[str]:
-    """Set of mount points on network filesystems (via mount(8))."""
-    mounts: set[str] = set()
+    """Set of mount points on network filesystems (via getmntinfo)."""
     try:
-        out = subprocess.run(
-            ["mount"], capture_output=True, text=True, check=False, timeout=5
-        )
-        for line in out.stdout.splitlines():
-            parts = line.split(" on ")
-            if len(parts) < 2:
-                continue
-            fstype = (
-                parts[0].split(",")[-1] if "," in parts[0] else parts[0].split()[-1]
-            )
-            if any(t in fstype for t in NETWORK_MOUNT_TYPES):
-                mp = parts[1].split(" (")[0].strip()
-                mounts.add(mp)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    return mounts
+        mounts = _getmntinfo_pairs()
+    except (OSError, AttributeError, ctypes.ArgumentError):
+        return set()
+    return {pt for fs, pt in mounts if fs in NETWORK_MOUNT_TYPES}
 
 
 def _walk(root: str) -> list[dict]:
@@ -84,18 +125,22 @@ def _walk(root: str) -> list[dict]:
 def dir_sizes(root: str) -> dict[str, int]:
     """Map of dir path → total size (sum of all descendants).
 
-    Every entry (file or dir) accumulates its size into its parent.
-    Deepest-first ensures a child's total is complete before it rolls
-    into its parent. Root is seeded at 0 so it accumulates correctly.
+    Files are rolled into their parent immediately so the map stays
+    directory-only (home trees have ~10^6 files).
     """
     root = os.path.realpath(root)
     entries = _walk(root)
     sizes: dict[str, int] = {root: 0}
     for e in entries:
-        sizes[e["path"]] = 0 if e["is_dir"] else e["size"]
-    for e in sorted(entries, key=lambda x: len(x["path"]), reverse=True):
-        parent = os.path.dirname(e["path"])
-        sizes[parent] = sizes.get(parent, 0) + sizes[e["path"]]
+        if e["is_dir"]:
+            sizes[e["path"]] = sizes.get(e["path"], 0)
+        else:
+            parent = os.path.dirname(e["path"])
+            sizes[parent] = sizes.get(parent, 0) + e["size"]
+    # Deepest-first so a child's total is complete before it rolls up.
+    for path in sorted((p for p in sizes if p != root), key=len, reverse=True):
+        parent = os.path.dirname(path)
+        sizes[parent] = sizes.get(parent, 0) + sizes[path]
     return sizes
 
 
@@ -121,44 +166,73 @@ def _size_b(b: int) -> str:
     return f"{b / (1024 * 1024 * 1024):.2f}G"
 
 
-def _run_scan(args) -> int:
+def _run_scan(args, reporter: Reporter) -> int:
     sizes, total = scan(args.dir)
-    print(f"Scan of {args.dir}: {_size_b(total)}")
-    for path, size in top_largest(sizes, 10):
-        if path == os.path.realpath(args.dir):
-            continue
-        print(f"  {_size_b(size):>10}  {path}")
-    return 0
-
-
-def _run_top(args) -> int:
-    # top requires a scan; default to home
-    target = getattr(args, "dir", None) or str(Path.home())
-    sizes, _ = scan(target)
-    print(f"Top 25 largest under {target}:")
-    for i, (path, size) in enumerate(top_largest(sizes, 25), 1):
-        if size == 0:
-            continue
-        print(f"  {i:>2}. {_size_b(size):>10}  {path}")
-    return 0
-
-
-def _run_summary(args) -> int:
-    target = getattr(args, "dir", None) or str(Path.home())
-    sizes, _ = scan(target)
-    root = os.path.realpath(target)
-    top = sorted(
-        ((p, s) for p, s in sizes.items() if os.path.dirname(p) == root and s > 0),
-        key=lambda kv: kv[1],
-        reverse=True,
+    top = [(p, s) for p, s in top_largest(sizes, 10) if p != os.path.realpath(args.dir)]
+    reporter.info(
+        "disk_scan",
+        path=args.dir,
+        total_bytes=total,
+        top=[{"path": p, "size_bytes": s} for p, s in top],
     )
-    print(f"Top-level breakdown of {target} ({_size_b(sum(s for _, s in top))}):")
-    for path, size in top:
-        print(f"  {_size_b(size):>10}  {os.path.basename(path) or path}")
     return 0
 
 
-def _run_system_data(args) -> int:
+def _run_top(args, reporter: Reporter) -> int:
+    target = getattr(args, "dir", None) or str(Path.home())
+    sizes, _ = scan(target)
+    items = [(i, p, s) for i, (p, s) in enumerate(top_largest(sizes, 25), 1) if s != 0]
+    rows = [
+        [str(i), view.human_size(s), p]
+        for i, p, s in items
+    ]
+    reporter.table("disk_top", ["#", "Size", "Path"], rows)
+    return 0
+
+
+def _child_sizes(root: str) -> list[tuple[str, int]]:
+    """Size only immediate children via one `du -sk` per child (no full walk)."""
+    root = os.path.realpath(root)
+    if not os.path.isdir(root):
+        raise SystemExit(f"Not a directory: {root}")
+    rows: list[tuple[str, int]] = []
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return rows
+    for entry in entries:
+        try:
+            if entry.is_symlink():
+                continue
+        except OSError:
+            continue
+        out = subprocess.run(
+            ["du", "-sk", entry.path],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if out.returncode != 0 or not out.stdout:
+            continue
+        try:
+            kb = int(out.stdout.split()[0])
+        except (ValueError, IndexError):
+            continue
+        if kb > 0:
+            rows.append((entry.path, kb * 1024))
+    rows.sort(key=lambda kv: kv[1], reverse=True)
+    return rows
+
+
+def _run_summary(args, reporter: Reporter) -> int:
+    target = getattr(args, "dir", None) or str(Path.home())
+    top = _child_sizes(target)
+    rows = [[view.human_size(s), os.path.basename(p) or p] for p, s in top]
+    reporter.table("disk_summary", ["Size", "Path"], rows)
+    return 0
+
+
+def _run_system_data(args, reporter: Reporter) -> int:
     home = Path(os.environ.get("CLEANMAC_HOME", Path.home()))
     targets = {
         "User caches": home / "Library/Caches",
@@ -172,23 +246,29 @@ def _run_system_data(args) -> int:
         "pip cache": home / "Library/Caches/pip",
         "iOS backups": home / "Library/Application Support/MobileSync/Backup",
     }
-    print("System data breakdown:")
-    total = 0
-    for label, p in targets.items():
-        if not p.exists():
-            continue
-        # size via du (fast, handles symlinks/SIP)
-        try:
-            out = subprocess.run(
-                ["du", "-sk", str(p)], capture_output=True, text=True, check=False
-            )
-            kb = int(out.stdout.split()[0]) if out.returncode == 0 else 0
-        except (OSError, ValueError, IndexError):
-            kb = 0
-        if kb > 0:
-            total += kb
-            print(f"  {_size_b(kb * 1024):>10}  {label}  ({p})")
-    print(f"  Total: {_size_b(total * 1024)}")
+    existing = [(label, p) for label, p in targets.items() if p.exists()]
+    rows: list[list[str]] = []
+    if existing:
+        out = subprocess.run(
+            ["du", "-sk", *[str(p) for _, p in existing]],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        sized: dict[str, int] = {}
+        for line in out.stdout.splitlines():
+            parts = line.split(None, 1)
+            if len(parts) != 2:
+                continue
+            try:
+                sized[parts[1]] = int(parts[0])
+            except ValueError:
+                continue
+        for label, p in existing:
+            kb = sized.get(str(p), 0)
+            if kb > 0:
+                rows.append([view.human_size(kb * 1024), label])
+    reporter.table("system_data", ["Size", "Label"], rows)
     return 0
 
 
@@ -232,7 +312,7 @@ def _build_treemap_json(sizes: dict[str, int], root: str) -> dict:
     }
 
 
-def _run_report(args) -> int:
+def _run_report(args, reporter: Reporter) -> int:
     sizes, _ = scan(args.dir)
     treemap = _build_treemap_json(sizes, args.dir)
     # simple squarified-ish treemap in JS, self-contained
@@ -316,19 +396,19 @@ render(root);
 </body>
 </html>"""
     Path(out).write_text(html_body, encoding="utf-8")
-    print(f"Report written to {out}")
+    reporter.info("report_written", path=out)
     return 0
 
 
-def run(args) -> int:
+def run(args, reporter: Reporter) -> int:
     if args.disk_cmd == "scan":
-        return _run_scan(args)
+        return _run_scan(args, reporter)
     if args.disk_cmd == "top":
-        return _run_top(args)
+        return _run_top(args, reporter)
     if args.disk_cmd == "summary":
-        return _run_summary(args)
+        return _run_summary(args, reporter)
     if args.disk_cmd == "system-data":
-        return _run_system_data(args)
+        return _run_system_data(args, reporter)
     if args.disk_cmd == "report":
-        return _run_report(args)
+        return _run_report(args, reporter)
     return 2
