@@ -52,35 +52,30 @@ def run(args: Any, deleter: Deleter, sudo: Sudo | None, reporter: Reporter) -> i
     helpers = list(fp.get("helpers", []))
     bba_items = list(fp.get("bba", []))  # (label, plist_url)
     matrix = au._build_matrix(target, fp)
+    paths = user + sys_paths + brew + helpers + [p for _l, p in bba_items if p]
 
-    reporter.info(
-        "uninstall_plan",
-        name=target.name,
-        bundle_id=target.bundle_id or "",
-        app_installed=target.app_installed,
-        bundle_path=target.path or "",
-        matrix=matrix,
-        leftover_count=len(user),
-        system_count=len(sys_paths),
-        launch_count=len(launch),
-        brew_count=len(brew),
-        helpers_count=len(helpers),
-        bba_count=len(bba_items),
-    )
-    if not reporter.json_mode:
-        cols = [
-            "app", "mas", "pkg", "brew", "support", "cache", "prefs",
-            "container", "saved", "agents", "daemons", "helpers", "kext", "btm",
-        ]
-        print("  " + "  ".join(f"{c:>10}" for c in cols))
-        print("  " + "  ".join(f"{matrix.get(c, '—'):>10}" for c in cols))
-    for p in user + sys_paths + brew + helpers:
-        reporter.info("uninstall_target", path=p)
-    for label, plist_url in bba_items:
-        reporter.info("uninstall_bba_target", label=label, plist=plist_url)
+    if reporter.json_mode:
+        reporter.info(
+            "uninstall_plan",
+            name=target.name,
+            bundle_id=target.bundle_id or "",
+            app_installed=target.app_installed,
+            bundle_path=target.path or "",
+            matrix=matrix,
+            leftover_count=len(user),
+            system_count=len(sys_paths),
+            launch_count=len(launch),
+            brew_count=len(brew),
+            helpers_count=len(helpers),
+            bba_count=len(bba_items),
+        )
+        for p in paths:
+            reporter.info("uninstall_target", path=p)
+    else:
+        print(au._human_plan(target, matrix, paths))
 
     # 3. One yes/no gate. This is the only confirmation.
-    if not confirm_yes("Delete all of this?"):
+    if not confirm_yes(f"Delete {target.name} and leftovers?"):
         reporter.warn("uninstall_aborted")
         return 0
 

@@ -435,6 +435,25 @@ def _build_fingerprint_for_target(target) -> dict:
     return fp
 
 
+_CLEANABLE = (
+    "pkg",
+    "brew",
+    "support",
+    "cache",
+    "prefs",
+    "container",
+    "saved",
+    "agents",
+    "daemons",
+    "helpers",
+)
+
+
+def _leftover_flags(matrix: dict[str, str]) -> list[str]:
+    """Cleanable columns that are Y — the reason an app is in the picker."""
+    return [c for c in _CLEANABLE if matrix.get(c) == "Y"]
+
+
 def _matrix_has_leftovers(matrix: dict[str, str]) -> bool:
     """True if a matrix has any cleanable leftover category set to Y.
 
@@ -442,18 +461,65 @@ def _matrix_has_leftovers(matrix: dict[str, str]) -> bool:
     installed app — the bundle is what you're removing, not a leftover).
     kext/btm are never addressable.
     """
-    cleanable = (
-        "pkg", "brew", "support", "cache", "prefs", "container",
-        "saved", "agents", "daemons", "helpers",
-    )
-    return any(matrix.get(c) == "Y" for c in cleanable)
+    return bool(_leftover_flags(matrix))
+
+
+def _picker_label(name: str, flags: list[str]) -> str:
+    """One picker row: name, then leftover flags."""
+    if not flags:
+        return name
+    return f"{name}  {'  '.join(flags)}"
+
+
+def _short_path(path: str, home: str | None = None) -> str:
+    root = home or os.environ.get("CLEANMAC_HOME") or str(Path.home())
+    if path == root or path.startswith(root + os.sep):
+        return "~" + path[len(root) :]
+    return path
+
+
+def _human_plan(
+    target,
+    matrix: dict[str, str],
+    paths: list[str],
+    home: str | None = None,
+) -> str:
+    """Product plan: name, id, leftover flags, short paths. No debug dump."""
+    flags = _leftover_flags(matrix)
+    lines = [target.name]
+    if target.bundle_id:
+        lines.append(target.bundle_id)
+    if target.app_installed and target.path:
+        lines.append(_short_path(target.path, home=home))
+    elif not target.app_installed:
+        lines.append("app already gone")
+    lines.append("")
+    lines.append("leftovers  " + ("  ".join(flags) if flags else "none"))
+    for p in paths:
+        lines.append(f"  {_short_path(p, home=home)}")
+    return "\n".join(lines)
+
+
+def _apps_with_leftovers() -> list[tuple[AppInfo, list[str]]]:
+    """Installed apps that have at least one cleanable leftover flag."""
+    out: list[tuple[AppInfo, list[str]]] = []
+    for app in list_apps():
+        target = UninstallTarget(
+            name=app.name,
+            bundle_id=app.bundle_id,
+            path=app.path,
+            app_installed=True,
+            query=app.name,
+        )
+        fp = _build_fingerprint_for_target(target)
+        flags = _leftover_flags(_build_matrix(target, fp))
+        if flags:
+            out.append((app, flags))
+    return out
 
 
 def _has_cleanable_leftovers(app: AppInfo) -> bool:
-    """True if an installed app has any cleanable leftover beyond its bundle.
-
-    Builds the app's matrix and checks whether any leftover category is Y.
-    """
+    """True if an installed app has any cleanable leftover beyond its bundle."""
     target = UninstallTarget(
         name=app.name,
         bundle_id=app.bundle_id,
@@ -1199,14 +1265,21 @@ def _picker_paint(
     end: int,
     prev_lines: int = 0,
     filter_text: str = "",
+    count: int | None = None,
 ) -> tuple[str, int]:
     """Paint one picker frame. Rewind ``prev_lines`` instead of appending.
 
     Returns (bytes_to_write, line_count_of_this_frame).
     """
+    n_apps = count if count is not None else len(apps)
+    title = f"uninstall — {n_apps} with leftovers"
+    keys = "up/down  enter  type to filter  q cancel"
     body = _render_rows(apps, idx, start, end)
     hint = f"  filter: {filter_text or '(type to filter)'}"
-    frame_lines = (body.split("\r\n") if body else []) + [hint]
+    frame_lines = [title, keys]
+    if body:
+        frame_lines.extend(body.split("\r\n"))
+    frame_lines.append(hint)
     n = len(frame_lines)
     parts: list[str] = []
     if prev_lines > 0:
@@ -1223,8 +1296,12 @@ def _pick_app_interactive(reporter: Reporter) -> str | None:
     cancel. Redraws only a small window of rows — never clears the whole
     screen. stdlib termios/tty only.
     """
-    apps = [a for a in list_apps() if _has_cleanable_leftovers(a)]
-    if not apps:
+    sys.stdout.write("scanning leftovers...\n")
+    sys.stdout.flush()
+    catalog = _apps_with_leftovers()
+    sys.stdout.write("\r\x1b[1A\r\x1b[2K")
+    sys.stdout.flush()
+    if not catalog:
         reporter.warn("no_apps_installed")
         return None
 
@@ -1241,20 +1318,27 @@ def _pick_app_interactive(reporter: Reporter) -> str | None:
         sys.stdout.flush()
         idx = 0
         while True:
-            shown = apps
+            shown = catalog
             if query:
                 q = query.lower()
                 shown = [
-                    a
-                    for a in apps
-                    if q in a.name.lower() or (a.bundle_id and q in a.bundle_id.lower())
+                    pair
+                    for pair in catalog
+                    if q in pair[0].name.lower()
+                    or (pair[0].bundle_id and q in pair[0].bundle_id.lower())
                 ]
             if idx >= len(shown):
                 idx = max(0, len(shown) - 1)
             start, end = _visible_window(idx, len(shown))
-            rows = [a.name for a in shown]
+            rows = [_picker_label(a.name, flags) for a, flags in shown]
             frame, prev_lines = _picker_paint(
-                rows, idx, start, end, prev_lines=prev_lines, filter_text=query
+                rows,
+                idx,
+                start,
+                end,
+                prev_lines=prev_lines,
+                filter_text=query,
+                count=len(catalog),
             )
             sys.stdout.write(frame)
             sys.stdout.flush()
@@ -1272,8 +1356,8 @@ def _pick_app_interactive(reporter: Reporter) -> str | None:
                 idx = _move_cursor(idx, "up", len(shown))
             elif key == "enter":
                 if shown:
-                    chosen = shown[idx].name
-                    sys.stdout.write(f"\x1b[0m\x1b[?25h\r\nSelected: {chosen}\r\n")
+                    chosen = shown[idx][0].name
+                    sys.stdout.write("\x1b[0m\x1b[?25h\r\n")
                     sys.stdout.flush()
                     return chosen
             elif key == "cancel":
