@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    paths:
+      - "Sources/**"
+      - "Tests/**"
+      - "Package.swift"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "Sources/**"
+      - "Tests/**"
+      - "Package.swift"
+
+jobs:
+  build-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build -c release
+      - name: Test
+        run: swift test

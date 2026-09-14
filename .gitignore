@@ -1,10 +1,18 @@
-# Python
+# Swift
+.build/
+.app/
+*.xcuserstate
+
+# Python (archived; venv ignored)
 __pycache__/
 *.pyc
 .pytest_cache/
 *.egg-info/
 .venv/
 
-# OS
+# OS / editor
 .DS_Store
 .opencode/
+.impeccable/
+
+build/

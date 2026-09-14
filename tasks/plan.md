@@ -1,97 +1,100 @@
-# Implementation Plan: Uninstall matrix + brew/helper scanners
+# Implementation Plan: CleanMac native Swift app (menu bar + window), full parity
 
 ## Overview
 
-Two changes, one uninstall slice:
+Rewrite CleanMac as a native macOS Swift app: menu-bar icon with popover for
+quick actions plus a full window for detail screens. v1 replicates all eight
+Python/bash tools with behavioral parity: deep uninstall, junk cleanup,
+duplicate finder, disk analyzer, memory cleaner, hidden-files toggle,
+startup/orphan (BBA) management, and app inventory. Dry-run-by-default,
+single-confirm destructive flows, JSONL audit, and the sudo-once model carry
+over unchanged. The Python implementation in `py/` + `bin/` + `lib/` is the
+executable spec — every slice below cites the source behavior it ports.
 
-1. **Boolean matrix output** — the uninstall plan becomes one row per
-   app, one column per documented leftover store, cell = `Y` (present +
-   will delete) / `N` (absent) / `—` (not addressable). App-gone-but-
-   leftovers remains obvious at a glance.
-2. **Two new cleaners** — `brew` (Homebrew Caskroom/Cellar) and `helpers`
-   (PrivilegedHelperTools) — because the matrix is a *view* and today we
-   only *scan+delete* nine stores; these two have no code behind them.
+## Architecture Decisions
 
-Locked column set (docs-backed, union of Apple Library table + App Store
-receipt + SMAppService + Homebrew Cask uninstall/zap):
+- **Native-first, no custom reinvention.** Use SwiftUI/AppKit/Foundation
+  capabilities before writing custom code: `List`/`Table`, `NSStatusItem`
+  popover, `FileManager` enumeration, `Process` for system tools, `SMAppService`
+  for privilege, ` partijen`… (no third-party UI or utility dependencies in v1;
+  every proposed dependency needs a written justification).
+- **Liquid Glass design language throughout.** Translucent layered surfaces,
+  depth over chrome, system materials (`.ultraThinMaterial` and friends),
+  SF Symbols, native light/dark adaptation — no custom-drawn lookalikes of
+  system components.
+- **TDD + incremental delivery on every task.** Failing test first
+  (`swift test --filter`), thin vertical slices, verify + commit per slice.
+  Scaffold/config files are the documented TDD exception.
 
-```
-app  mas  pkg  brew  support  cache  prefs  container  saved  agents  daemons  helpers
-```
-
-- `mas` (receipt) lives **inside** the `.app`; dies with the bundle. Rendered
-  `Y` only while the app is alive, else `—`. No separate delete.
-- `kext`, BTM/login items (`sfltool`), Keychain, TCC: **not addressable** —
-  render as `—`, never in the delete set.
-- `pkg` receipts, support/cache/prefs/container/saved/agents/daemons: already
-  cleaned today.
-
-Same command surface: `cleanmac uninstall [target]`, one `y/N` gate.
-
-## Current state
-
-| Column | Clean today? |
-|---|---|
-| app | yes — bundle delete |
-| support / cache / prefs / byhost / container / group / saved / webkit / http / cookies / logs / services / quicklook / spotlight | yes — USER_PATTERNS |
-| agents (user) | yes — quarantine |
-| daemons | yes — sudo quarantine |
-| pkg receipts | yes — SYSTEM_PATTERNS |
-| **brew** | **no code** |
-| **helpers** | **no code** |
-
-## Architecture decisions
-
-- `brew` clean = remove matching entry under `$(brew --prefix)/Caskroom`
-  (the installed cask) and any `Cellar/<name>` for a formula with the same
-  name. Homebrew keeps these trees; removing them is what a cask zap does
-  for Homebrew's own install directory. Treated as user-writable (brew is
-  user-owned by default).
-- `helpers` = scan `/Library/PrivilegedHelperTools` (and `~/Library/...` if
-  present) for executables whose name or embedded bundle id matches the
-  target vendor prefix or name. Requires sudo to delete.
-- Both scanners share the vendor-prefix rule (`us.zoom.xos` → `us.zoom.`).
-- Matrix is data: a dict of column → (present, path|None). Human prints the
-  transposed one-row form; JSON emits the same keys so it stays byte-identical
-  in shape.
+- **SwiftUI for UI, AppKit bridges where SwiftUI can't reach** (menu-bar
+  `NSStatusItem` popover needs AppKit; tables/lists are SwiftUI). Rationale:
+  fastest to working UI, native look, Xcode previews for visual review.
+- **Swift Package Manager layout, one `CleanMac` app target + `CleanMacCore`
+  library target.** Rationale: engine testable without launching the app;
+  mirrors `py/src/maccleaner` module boundaries (Core, Uninstall, Scanners…).
+- **Engine first per slice, UI second, always behind the same slice.**
+  Rationale: keeps every task shippable and testable headless via
+  `swift test`.
+- **Safety core is Task 1 and blocks everything destructive.** The
+  realpath-allowlist, commit gate, single-confirm, and audit writer port
+  first; every later slice reuses them instead of reimplementing.
+- **Privileged work via SMAppService helper (modern) not raw sudo.**
+  Rationale: `sudo` prompts don't belong in a GUI app; a privileged helper
+  with `SMAuthorizedWork` is the Apple-blessed path. Falls back to
+  per-action auth prompt when the helper isn't installed.
+- **No Sparkle/Homebrew distribution in v1.** Signed + notarized DMG from
+  Xcode; auto-update is explicitly out of scope (open question below).
 
 ## Task List
 
-### Task 1: brew scanner
-- Add `brew_paths(bundle, name)` → matching Caskroom + Cellar entries
-- Add to fingerprint `fp["brew"]`
-- Tests: sandboxed fake Caskroom
+### Phase 1: Safe slices (read-only or user-level temp cleanup first)
 
-### Task 2: helpers scanner
-- Add `helper_paths(bundle, name)` under PrivilegedHelperTools
-- Add to fingerprint `fp["helpers"]`
-- Tests: sandboxed fake helpers dir
+- [ ] Task 0: Xcode project + SPM layout + CI build
+- [ ] Task 1: Safety core port (allowlist, commit gate, audit, dry-run)
+- [ ] Task 6: Junk cleanup engine + screen (8 steps, progress, report)
+      — also establishes the menu-bar shell + window used by all later UI
+- [ ] Task 8: Disk analyzer engine + screen (scan, top, treemap or bar view)
+- [ ] Task 7: Duplicate finder engine + screen (hash, groups table)
+- [ ] Task 9: Memory engine + screen (free, heavy list, guarded kill)
 
-### Checkpoint: fingerprint union complete
+### Checkpoint: Safe tools
+- [ ] Junk/disk/dup/memory all work dry-run with zero destructive paths
+- [ ] Human review of menu-bar shell + one screen before proceeding
 
-### Task 3: boolean matrix render (human + JSON)
-- `uninstall.py` builds column dict, prints one-row matrix
-- JSON identical shape
-- Tests: row string + JSON
+### Phase 2: Destructive slices (uninstall flagship + startup)
 
-### Task 4: clean brew + helpers on `y`
-- Wire brew (user) + helpers (sudo) into the delete set
-- Tests: no-commit no-op; commit deletes
+- [ ] Task 2: App inventory (system_profiler JSON + fallback glob)
+- [ ] Task 3: Leftover fingerprint (user/system/launch/brew/helpers, matrix)
+- [ ] Task 4: Uninstall flow (plan → single confirm → delete → quarantine)
+- [ ] Task 5: Uninstall window (picker list, plan table) in the Phase 1 shell
+- [ ] Task 10: Hidden-files toggle + startup/orphan (BBA) screens
 
-### Checkpoint: uninstall removes all addressable stores
+### Checkpoint: Flagship
+- [ ] Uninstall one real app end-to-end in a sandbox home
+- [ ] Human review of picker + plan screens before proceeding
 
-### Task 5: README + column legend
-- Document the row + which are `—`
+### Phase 3: Ship
 
-## Risks
+- [ ] Task 11: Privileged helper (SMAppService) for system-scope deletes
+- [ ] Task 12: Signing, notarization, DMG, first-run permission onboarding
 
-| Risk | Mitigation |
-|---|---|
-| Brew paths vary by prefix | resolve `brew --prefix` once; fall back to `/opt/homebrew`/`/usr/local` |
-| Caskroom match ambiguity | match exact Caskroom/<name> + Cellar/<name>; do not fuzzy glob whole prefix |
-| Helpers name drift | match vendor prefix + bundle-id-derived names; no brand list |
-| Never touch kext/BTM/login | exclude from delete set; render as `—` |
+### Checkpoint: Complete
+- [ ] Notarized DMG installs on a clean Mac, all flows work
+- [ ] Ready for review
 
-## Out of scope
+## Risks and Mitigations
 
-kext, BTM/slogin items, Keychain, TCC, per-app brand maps.
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| Full parity is 11 tasks; scope creep per tool | High | Vertical slices with per-slice acceptance; cut a tool to v1.1, never half-ship it |
+| Privileged helper + notarization friction (entitlements, TCC) | High | Task 11 early-spikes the helper with a throwaway target; Task 12 last |
+| SwiftUI menu-bar popover quirks (focus, Esc, screen edges) | Med | AppKit `NSPopover` bridge from day one; Esc-to-close test in Task 5 |
+| system_profiler/sfltool latency on first launch | Med | Lazy + cached inventory (port the lru_cache pattern); progress UI |
+| Diverging from Python behavior silently | Med | Each slice cites source files; audit-event names stay identical |
+
+## Open Questions
+
+- Distribution beyond signed DMG (Homebrew cask? Sparkle updates?) — v2.
+- Minimum macOS version (propose 14 Sonoma for SMAppService + modern SwiftUI).
+- What happens to `py/` + `bin/` — archive, or keep as reference CLI?
+- Menu-bar-only mode vs always-a-Dock-icon — default?
