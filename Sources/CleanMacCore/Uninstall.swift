@@ -47,9 +47,12 @@ public enum Uninstall: Sendable {
             if Fingerprint.isSeparatorBoundaryMatch(candidate: c, target: target) { return true }
         }
         if target.lowercased().hasSuffix(".app") {
-            let base = String(target.dropLast(4))
+            // Bare-stem fallback matches exact components only: extending the
+            // separator rule here would re-admit "Foo.app2.*" via the "." in
+            // "foo" + ".app2" — the exact misattribution the rule prevents.
+            let base = String(target.dropLast(4)).lowercased()
             for c in components {
-                if Fingerprint.isSeparatorBoundaryMatch(candidate: c, target: base) { return true }
+                if c.lowercased() == base { return true }
             }
         }
         return false
